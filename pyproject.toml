@@ -1,0 +1,13 @@
+[project]
+name = "cobotique"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "ipykernel>=7.4.0",
+    "jupyterlab>=4.6.6",
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.5",
+    "opencv-python<5",
+    "polars>=2.1.0",
+    "ur-rtde>=1.6.5",
+]
