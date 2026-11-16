@@ -6,9 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A cobot project built on the teaching material of a workshop called "IA et Cobotique" (AI and collaborative robotics), held at Telecom Nancy. The workshop covers controlling a Universal Robots **UR5** arm through the **URSim** simulator from Python.
 
+**Project goal: make the robot follow an object.** The camera detects the object in each frame, `pixel_to_robot` maps its position to robot (X, Y), and the TCP tracks above it. New work goes in the `cobot` package (plus scripts or notebooks that import it), not in the workshop notebooks.
+
+The workshop notebooks live in `notebooks/` (Jupyter runs them with that folder as cwd, so they load the MobileNet files from `../` and write `snapshot.jpg`, `trajectory.csv`, `calib_*.jpg`, `homography.npy` next to themselves).
+
 Project code lives in the `cobot` package (`src/cobot/`, installed editable by `uv sync`): `robot.py` (`Robot`, checked `move_j`/`move_l`/`gripper`), `kinematics.py` (UR5e DH FK), `vision.py` (camera, HSV detection, MobileNet-SSD), `calibration.py` (board ordering, homography, `pixel_to_robot`). Per-setup calibration values are in `config/calibration.json`; generated calibration data goes in `data/` (git-ignored). Put reusable code in the package and import it from notebooks rather than copying cells. `README.md` has the setup steps.
 
-Tests: `uv run pytest` (pure functions, no URSim needed except the `ursim`-marked test; `-m "not ursim"` to skip it). Git: the main branch is `main`; notebook outputs are stripped on commit by nbstripout and `*.pptx`/`*.caffemodel` go through Git LFS (both set up per clone by `scripts/setup_git.sh`). The caffemodel is not committed: `scripts/download_models.sh` fetches it with a checksum.
+Tests: `uv run pytest` (pure functions, no URSim needed except the `ursim`-marked test; `-m "not ursim"` to skip it). Git: the main branch is `master`; notebook outputs are stripped on commit by nbstripout and `*.pptx`/`*.caffemodel` go through Git LFS (both set up per clone by `scripts/setup_git.sh`). The caffemodel is not committed: `scripts/download_models.sh` fetches it with a checksum.
 
 Each day has a French lecture deck `AI-and-Cobotics-Workshop-JourN_with_Gamma.pptx` and an English student notebook `DayN_*_Student.ipynb`, plus an optional instructor `DayN_*_Solution.ipynb`. The decks are 15–23 MB, so extract their text with `zipfile` (the `ppt/slides/slideN.xml` entries) rather than reading them directly.
 - **Day 1, URSim setup** (16 Nov): AI paradigms, the perception → planning → action loop, UR5 kinematics, URSim, RTDE/URScript. The notebook covers connecting with `ur_rtde`, `moveJ`, `safe_move`, and logging the TCP pose to `trajectory.csv` (Polars + matplotlib).
@@ -31,7 +35,7 @@ The environment is managed with **uv** (`pyproject.toml`, `uv.lock`, `.venv/`). 
 uv sync                                   # create/refresh .venv
 uv run jupyter lab                        # or select the "Python (cobotique)" kernel in VS Code
 uv add <pkg>                              # add a dependency
-uv run jupyter nbconvert --to notebook --execute Day1_URSim_Setup_Student.ipynb --output /tmp/out.ipynb   # headless run
+uv run jupyter nbconvert --to notebook --execute notebooks/Day1_URSim_Setup_Student.ipynb --output /tmp/out.ipynb   # headless run
 ```
 
 `ur_rtde` provides the `rtde_control` and `rtde_receive` modules. **OpenCV is pinned `<5`** because OpenCV 5 removed `cv2.dnn.readNetFromCaffe`, which Day 2 Exercise 3 uses. The `MobileNetSSD_deploy.{prototxt,caffemodel}` files in the project root are chuanqi305/MobileNet-SSD's `deploy.prototxt` and `mobilenet_iter_73000.caffemodel`, renamed. Day 2 uses `cv2.imshow` windows (Qt5 build, runs through XWayland), so those cells need a desktop session and block until a key is pressed in the window. A Jupyter kernel named `cobotique` is registered in the user's kernelspecs and points at `.venv`.
