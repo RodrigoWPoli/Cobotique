@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repository is
 
-Teaching material for a workshop called "IA et Cobotique" (AI and collaborative robotics), held at Telecom Nancy. It is not a software project: there is no build system, no test suite and no git history. The workshop covers controlling a Universal Robots **UR5** arm through the **URSim** simulator from Python.
+A cobot project built on the teaching material of a workshop called "IA et Cobotique" (AI and collaborative robotics), held at Telecom Nancy. The workshop covers controlling a Universal Robots **UR5** arm through the **URSim** simulator from Python.
+
+Project code lives in the `cobot` package (`src/cobot/`, installed editable by `uv sync`): `robot.py` (`Robot`, checked `move_j`/`move_l`/`gripper`), `kinematics.py` (UR5e DH FK), `vision.py` (camera, HSV detection, MobileNet-SSD), `calibration.py` (board ordering, homography, `pixel_to_robot`). Per-setup calibration values are in `config/calibration.json`; generated calibration data goes in `data/` (git-ignored). Put reusable code in the package and import it from notebooks rather than copying cells. `README.md` has the setup steps.
+
+Tests: `uv run pytest` (pure functions, no URSim needed except the `ursim`-marked test; `-m "not ursim"` to skip it). Git: the main branch is `main`; notebook outputs are stripped on commit by nbstripout and `*.pptx`/`*.caffemodel` go through Git LFS (both set up per clone by `scripts/setup_git.sh`). The caffemodel is not committed: `scripts/download_models.sh` fetches it with a checksum.
 
 Each day has a French lecture deck `AI-and-Cobotics-Workshop-JourN_with_Gamma.pptx` and an English student notebook `DayN_*_Student.ipynb`, plus an optional instructor `DayN_*_Solution.ipynb`. The decks are 15–23 MB, so extract their text with `zipfile` (the `ppt/slides/slideN.xml` entries) rather than reading them directly.
 - **Day 1, URSim setup** (16 Nov): AI paradigms, the perception → planning → action loop, UR5 kinematics, URSim, RTDE/URScript. The notebook covers connecting with `ur_rtde`, `moveJ`, `safe_move`, and logging the TCP pose to `trajectory.csv` (Polars + matplotlib).
@@ -34,7 +38,7 @@ uv run jupyter nbconvert --to notebook --execute Day1_URSim_Setup_Student.ipynb 
 
 ### URSim (Docker)
 
-URSim runs from `compose.yaml` using the official `universalrobots/ursim_e-series` image with `ROBOT_MODEL=UR5`. That is Polyscope 5.x, so the robot is really a UR5e. The e-series was chosen because the notebook relies on Remote Control mode, which only exists there. Ports are bound to localhost only; `ursim/programs` and `ursim/urcaps` are mounted volumes.
+URSim runs from `compose.yaml` using the official `universalrobots/ursim_e-series` image (pinned to `5.26` by digest, i.e. URSim 5.26.3) with `ROBOT_MODEL=UR5`. That is Polyscope 5.x, so the robot is really a UR5e. The e-series was chosen because the notebook relies on Remote Control mode, which only exists there. Ports are bound to localhost only; `ursim/programs` and `ursim/urcaps` are mounted volumes.
 
 ```bash
 ursim/bringup.sh        # docker compose up -d + power on + brake release (idempotent)
@@ -45,6 +49,6 @@ docker compose down     # stop
 - On URSim, the dashboard's `is in remote control` reply reads `false` even when remote control works, so don't use it as a check.
 - Only **one** `RTDEControlInterface` can be connected at a time. A second one fails with `One of the RTDE input registers are already in use!`, which usually means a notebook kernel still holds the connection; call `rtde_c.stopScript()` or restart the kernel. Any number of `RTDEReceiveInterface` clients can connect.
 
-- **`ur_rtde` 1.6.5 + Polyscope 5.26: `rtde_c.getForwardKinematics(q)` returns wrong poses for an explicit `q`.** Called with no arguments, it is correct (current pose). The solution notebook computes FK itself from the UR5e DH parameters instead; this matches `getActualTCPPose()` to within 1e-10 m.
+- **`ur_rtde` 1.6.5 + Polyscope 5.26: `rtde_c.getForwardKinematics(q)` returns wrong poses for an explicit `q`.** Called with no arguments, it is correct (current pose). Use `cobot.forward_kinematics` (UR5e DH parameters) instead; `tests/test_kinematics.py::test_matches_ursim` checks it against `getActualTCPPose()` on the live controller.
 
 UR ports the material refers to: 30001–30004 for URScript and dashboard traffic, 30002 for the secondary client interface, 30004 for RTDE. The code cells cannot run without a reachable URSim: the `RTDEControlInterface` constructor fails immediately if none is found.

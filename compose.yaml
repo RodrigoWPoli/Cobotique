@@ -4,7 +4,8 @@
 #   docker compose down       -> stop
 services:
   ursim:
-    image: universalrobots/ursim_e-series:latest
+    # Pinned to URSim 5.26.3 (Polyscope 5.26). Bump deliberately: ur_rtde behaviour differs across versions.
+    image: universalrobots/ursim_e-series:5.26@sha256:c80dfb4ec6b554db6d20ba45fb90d0ec056d0303bd3c7a7040a4e8b503eaaf87
     container_name: ursim
     environment:
       ROBOT_MODEL: UR5

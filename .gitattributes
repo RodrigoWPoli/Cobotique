@@ -1,0 +1,6 @@
+# Large binaries go through Git LFS (requires `git lfs install` once per machine).
+*.pptx filter=lfs diff=lfs merge=lfs -text
+*.caffemodel filter=lfs diff=lfs merge=lfs -text
+
+# Strip notebook outputs on commit (filter defined per clone: see README "Setup").
+*.ipynb filter=nbstripout diff=ipynb

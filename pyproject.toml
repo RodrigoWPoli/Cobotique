@@ -11,3 +11,20 @@ dependencies = [
     "polars>=2.1.0",
     "ur-rtde>=1.6.5",
 ]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "cobot"   # src/cobot, installed editable by `uv sync`
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["ursim: needs a running URSim (deselect with -m 'not ursim')"]
+
+[dependency-groups]
+dev = [
+    "nbstripout>=0.9.1",
+    "pytest>=9.2.0",
+]

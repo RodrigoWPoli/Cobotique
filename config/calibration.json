@@ -1,0 +1,9 @@
+{
+  "camera_index": 0,
+  "board_inner": [9, 6],
+  "square_size": 0.025,
+  "corner_a": [-0.55, -0.35],
+  "corner_b": [-0.35, -0.35],
+  "corner_c": [-0.55, -0.225],
+  "homography_file": "data/homography.npy"
+}

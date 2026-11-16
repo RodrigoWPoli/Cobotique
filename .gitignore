@@ -1,0 +1,25 @@
+# Environment
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Large / third-party assets (fetched by scripts/download_models.sh)
+*.caffemodel
+
+# Run outputs (notebooks and scripts write these)
+trajectory.csv
+snapshot.jpg
+calib_*.jpg
+homography.npy
+data/*
+!data/.gitkeep
+
+# URSim runtime state written by the container
+ursim/programs/programs.UR5
+ursim/programs/default.variables
+ursim/programs/*.old
+
+# Claude Code
+.claude/worktrees/
