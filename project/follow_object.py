@@ -59,11 +59,11 @@ HOME_SEED_DEG = [-162.8, -88.1, -120.5, -61.4, 90.0, -72.8]
 OBJECT_Z = 0.0                          # m, height of the object's top surface (table = 0)
 
 DT = 0.02                               # s, control period (50 Hz)
-GAIN = 3.0                              # 1/s, proportional gain: v = GAIN * offset (+ feedforward)
-FEEDFORWARD = 1.0                       # 0..1, add the estimated object velocity (0 = pure P control)
+GAIN = 1.0                              # 1/s, proportional gain: v = GAIN * offset (+ feedforward)
+FEEDFORWARD = 0.3                       # 0..1, add the estimated object velocity (0 = pure P control)
 VEL_FILTER = 0.15                       # 0..1, low-pass on the object velocity estimate
-MAX_SPEED = 0.15                        # m/s, TCP speed cap
-MAX_ACCEL = 0.5                         # m/s², limit on velocity changes
+MAX_SPEED = 0.05                        # m/s, TCP speed cap (kept low for safety)
+MAX_ACCEL = 0.15                        # m/s², limit on velocity changes
 DEADBAND_PX = 4                         # px, ignore smaller errors (detection jitter)
 ERROR_FILTER = 0.5                      # 0..1, low-pass on the measured offset (1 = no filter)
 LOST_TIMEOUT = 0.5                      # s without detection before the robot stops
@@ -470,7 +470,7 @@ def main():
     ap.add_argument('--headless', action='store_true', help='no window (for tests)')
     ap.add_argument('--duration', type=float, default=0, help='stop after N seconds (0 = run until q)')
     args = ap.parse_args()
-    GAIN, MAX_SPEED, FOLLOW_Z, FEEDFORWARD = args.gain, min(args.max_speed, 0.25), args.height, args.feedforward
+    GAIN, MAX_SPEED, FOLLOW_Z, FEEDFORWARD = args.gain, min(args.max_speed, 0.08), args.height, args.feedforward
     if (args.sim or args.webcam_table) and args.no_robot:
         sys.exit('--sim / --webcam-table need the robot pose; drop --no-robot')
 
@@ -494,8 +494,8 @@ def main():
             q = rtde_c.getInverseKinematics(start, seed)
             if not q or max(abs(a - b) for a, b in zip(q, seed)) > math.radians(60):
                 raise RuntimeError(f'No elbow-up IK solution near HOME_SEED_DEG for {start}')
-            print(f'Moving (moveJ) to start pose {START_XY} at z={FOLLOW_Z} m...')
-            rtde_c.moveJ(q, 0.8, 1.0)
+            print(f'Moving (moveJ, slow) to start pose {START_XY} at z={FOLLOW_Z} m...')
+            rtde_c.moveJ(q, 0.25, 0.25)  # rad/s, rad/s² — slow approach for safety
     hold = start[2:]          # z, rx, ry, rz kept constant while following
 
     if args.webcam_table:
