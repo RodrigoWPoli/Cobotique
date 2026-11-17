@@ -1,0 +1,4 @@
+# Workshop material (decks, Day notebooks, models): kept locally, not part of the project
+workshop/
+
+__pycache__/

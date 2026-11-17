@@ -15,9 +15,16 @@ wait_for() { # $1 = command, $2 = pattern, $3 = timeout seconds
 
 docker compose up -d
 echo "waiting for dashboard server..."; wait_for robotmode Robotmode 180
-dash "close popup" >/dev/null
 if ! dash robotmode | grep -q RUNNING; then
-  dash "power on";      wait_for robotmode 'IDLE\|RUNNING' 60
+  # On a cold start the dashboard answers before Polyscope is ready and the first
+  # "power on" is silently ignored, so keep re-sending it until the arm reacts.
+  end=$((SECONDS + 120))
+  until dash robotmode | grep -q 'IDLE\|RUNNING'; do
+    (( SECONDS < end )) || { echo "timeout: arm did not power on" >&2; exit 1; }
+    dash "close popup" >/dev/null; dash "close safety popup" >/dev/null
+    dash "power on" >/dev/null
+    sleep 5
+  done
   dash "brake release"; wait_for robotmode RUNNING 60
 fi
 echo "URSim ready: $(dash robotmode)  |  GUI: http://localhost:6080/vnc.html"
