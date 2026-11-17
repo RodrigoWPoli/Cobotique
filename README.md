@@ -1,5 +1,11 @@
 # Cobotique: UR5e object following
 
+### TLDR:
+
+```bash
+uv run python project/follow_object.py --ip 100.65.63.93 --start-here --load-calib       --object-distance 0.5 --max-speed 0.01 --gain 1.5 --radius 0.10 --color blue --camera realsense
+```
+
 **The UR5e follows a coloured object seen by a camera mounted on its tool** (eye-in-hand, image-based
 visual servoing). Each frame, `project/follow_object.py`:
 
@@ -9,7 +15,9 @@ visual servoing). Each frame, `project/follow_object.py`:
    feedforward of the object's estimated velocity, with deadband, speed and acceleration limits,
 4. integrates the velocity into a target pose and streams it with `servoL` at 50 Hz.
 
-The TCP keeps a fixed height and orientation; only X and Y are servoed. The target is always
+The TCP keeps its orientation and only moves in the plane at right angles to the camera's view: base
+X/Y for a camera looking down, or, with `--start-here`, the start pose's tool X/Y. A camera looking
+**forward** then follows sideways and up/down, and never moves toward the object. The target is always
 clamped to a workspace box. The robot brakes to a stop if the object is lost for 0.5 s and the
 script exits on a protective or emergency stop.
 
@@ -78,13 +86,18 @@ close that loop.
 | `--camera` | `0` | Camera index, device path, or `realsense` (finds the RealSense colour stream under `/dev/v4l/by-id`). |
 | `--color` | `red` | `red`, `yellow`, `green` or `blue`. |
 | `--ip` | `127.0.0.1` | Robot IP. Any IP other than `127.0.0.1`/`localhost` requires `--start-here`. |
-| `--gain` | `3.0` | Proportional gain (1/s): velocity = gain × offset. Lower it if the robot oscillates. |
-| `--feedforward` | `1.0` | 0–1. Adds the object's estimated velocity, which removes most of the lag on a moving object. `0` = pure P control. |
-| `--max-speed` | `0.15` | TCP speed cap in m/s, hard-limited to 0.25. |
+| `--gain` | `1.0` | Proportional gain (1/s): velocity = gain × offset. Lower it if the robot oscillates. |
+| `--feedforward` | `0.3` | 0–1. Adds the object's estimated velocity, which removes most of the lag on a moving object. `0` = pure P control. |
+| `--max-speed` | `0.02` | TCP speed cap in m/s (2 cm/s), also used for the calibration moves. Hard-limited to 0.08 for safety. Use `0.01` for 1 cm/s. |
 | `--height` | `0.30` | TCP height (m) while following. Ignored with `--start-here`, which keeps the current height. |
-| `--start-here` | off | Follow from the **current** pose (height and orientation). Never moves to a preset pose. Required on the real robot. |
-| `--radius` | `0.15` | With `--start-here`: half-size (m) of the XY box around the start position. |
-| `--calibrate` | off | Before following, move ±2 cm in X and Y and measure how a still object moves in the image (image Jacobian). Then the camera's mounting doesn't need to be known. |
+| `--start-here` | off | Follow from the **current** pose and orientation, moving in the plane of the start pose's tool X/Y (at right angles to the camera). Never moves to a preset pose. Required on the real robot. If the camera doesn't look down, `--calibrate` is required too. |
+| `--radius` | `0.15` | With `--start-here`: the target stays within ±radius (m) of the start position along each plane axis. |
+| `--calibrate` | off | Before following, move ±`--calib-step` along both plane axes and measure how a still object moves in the image (image Jacobian), then save it to `--calib-file`. The camera's mounting and the object's distance don't need to be known. Each position is the median of 20 frames; if the object drifts or the + and − shifts don't mirror each other, the object moved and calibration is refused. |
+| `--calibrate-scene` | off | Calibrate from the motion of the **whole scene** (ORB feature matches between frames): no object needed, so you can hold it in your hand, or not show it at all. Gives the image directions (rotation, mirroring) exactly; the scale comes from the focal length and `--object-distance`. Needs a textured scene (not a blank wall) and nothing large moving in view. Saves like `--calibrate`. |
+| `--object-distance` | `0.5` | Typical camera–object distance (m), used for the scale with `--calibrate-scene`. A wrong value only makes the robot react more or less strongly (lower `--gain` if it overshoots); the direction stays right. |
+| `--calib-step` | `0.05` | Size (m) of the calibration moves. Bigger = less sensitive to a slightly moving object. Keep it below `--radius`. |
+| `--load-calib` | off | Use the calibration saved by the last `--calibrate`: no calibration moves. Refused if the camera now looks more than 10° away from where it was calibrated. |
+| `--calib-file` | `data/follow_calibration.json` | Where `--calibrate` saves and `--load-calib` reads (`data/` is git-ignored). |
 | `--sim-mount YAW FLIP` | — | `--sim` only: actual camera mounting (yaw in degrees, mirror 0/1) to test `--calibrate`, e.g. `--sim-mount 90 1`. |
 | `--headless` | off | No window (tests). |
 | `--duration` | `0` | Stop after N seconds (`0` = run until `q`). |
@@ -106,11 +119,11 @@ Constants at the top of `follow_object.py`:
 | `HOME_SEED_DEG` | `[-162.8, -88.1, -120.5, -61.4, 90.0, -72.8]` | Joint seed for the start pose's IK: elbow-up, every joint far from its limits. |
 | `OBJECT_Z` | `0.0` m | Height of the object's top surface in the base frame. Used for depth when not calibrated. |
 | `DT` | `0.02` s | Control period (50 Hz). |
-| `GAIN` | `3.0` 1/s | Default for `--gain`. |
-| `FEEDFORWARD` | `1.0` | Default for `--feedforward`. |
+| `GAIN` | `1.0` 1/s | Default for `--gain`. |
+| `FEEDFORWARD` | `0.3` | Default for `--feedforward`. |
 | `VEL_FILTER` | `0.15` | Low-pass on the object velocity estimate (0–1, lower = smoother). |
-| `MAX_SPEED` | `0.15` m/s | Default for `--max-speed`. |
-| `MAX_ACCEL` | `0.5` m/s² | Limit on velocity changes. |
+| `MAX_SPEED` | `0.02` m/s | Default for `--max-speed`; also the speed of the calibration moves. |
+| `MAX_ACCEL` | `0.15` m/s² | Limit on velocity changes. |
 | `DEADBAND_PX` | `4` px | Offsets smaller than this are ignored (detection jitter). |
 | `ERROR_FILTER` | `0.5` | Low-pass on the measured offset (1 = no filter). |
 | `LOST_TIMEOUT` | `0.5` s | Time without detection before the robot brakes to a stop. |
@@ -148,17 +161,47 @@ The RealSense is mounted on the tool, so the default mode closes the loop for re
    and in a small box:
    ```bash
    uv run python project/follow_object.py --ip <ROBOT_IP> --start-here --calibrate \
-       --max-speed 0.05 --gain 1.5 --radius 0.10 --color red --camera realsense
+       --max-speed 0.02 --gain 1.5 --radius 0.10 --color red --camera realsense
    ```
-   `--calibrate` makes four slow 2 cm moves, prints the measured mapping (mm per pixel, image axis
-   direction, mirrored or not) and refuses to start if the object left the view or moved.
-4. When it follows smoothly, raise the speed and gain step by step, toward `--max-speed 0.15 --gain 3`.
+   `--calibrate` makes four slow 5 cm moves (at `--max-speed`, 2 cm/s by default), prints the measured mapping (mm per pixel, image axis
+   direction, mirrored or not), refuses to start if the object left the view or moved, and saves
+   the result. **Rest the object on something** during calibration rather than holding it: a hand
+   wobbles by 1–2 cm, which is the size of what calibration measures.
+   **Nowhere to rest it?** Use `--calibrate-scene` instead: it measures how the whole scene moves,
+   so the object can be in your hand (or out of view). Set `--object-distance` to roughly how far
+   you'll hold the object.
+   Next time, with the camera looking the same way, skip the moves with `--load-calib` instead of
+   `--calibrate`.
+4. When it follows smoothly, raise the speed and gain step by step, up to `--max-speed 0.08` (the hard cap) and `--gain 3`.
    If it oscillates, lower `--gain`. Camera latency on the real robot is the main limit.
 
 On an e-series robot, **Remote Control** must be on in Polyscope. If EtherNet/IP, PROFINET or MODBUS
 is enabled on the robot, the connection fails with "input registers already in use".
 
+### Camera looking forward
+
+With the tool horizontal, the robot follows an object held in front of the camera, moving sideways
+and up/down within ±`--radius`. Hold the object 30–80 cm from the camera; `--calibrate-scene`
+calibrates from the room, so it doesn't matter if your hand moves. Make sure nothing else of that colour is in view (in the lab, the **red door** behind the robot
+triggers `red`: use `blue`, or check first with `--no-robot`):
+
+```bash
+uv run python project/follow_object.py --ip 100.65.63.93 --start-here --calibrate-scene \
+    --object-distance 0.5 --max-speed 0.02 --gain 1.5 --radius 0.10 --color blue --camera realsense
+```
+
+### Network
+
+The lab robot is at **`100.65.63.93`** (UR5e, PolyScope 5.11); this PC's USB-Ethernet adapter uses
+`100.65.63.101/16`. That subnet is inside Tailscale's `100.64.0.0/10` range, and Tailscale drops
+replies from it that don't come through `tailscale0`: ARP works but ping and every UR port time out.
+Run `sudo tailscale down` while using the robot (`sudo tailscale up` afterwards), or give the robot
+and the adapter addresses outside `100.64.0.0/10`.
+
 ## Test results (URSim)
+
+Measured with the earlier, faster defaults (`--gain 3 --feedforward 1 --max-speed 0.15`); the current
+defaults are slower for safety, so the robot lags more behind a moving object.
 
 | Test | Mean / max tracking error |
 |---|---|
@@ -168,6 +211,15 @@ is enabled on the robot, the connection fails with "input registers already in u
 | `--sim-mount 90 1 --calibrate` | 6 mm / 13 mm |
 | `--sim-mount -135 0 --calibrate` | 9 mm / 18 mm |
 | `--webcam-table`, fake webcam image, still object | 0.7 mm |
+| Forward-looking camera (wall 50 cm ahead, image rotated 90°), `--start-here --calibrate` | 3.6 mm / 8.5 mm |
+| Same, `--load-calib` (saved calibration, no moves) | 3.6 mm / 7.4 mm |
+| Same, object wobbling ±5 mm during calibration | accepted, axis direction off by ~3°; 2.3 mm / 4.4 mm |
+| Same, object wobbling ±3 cm during calibration | refused ("the object moved during calibration") |
+| Textured wall 50 cm ahead, `--calibrate-scene`, object **moving** during calibration | 11.7 mm (object-based `--calibrate` in the same scene: 12.4 mm)¹ |
+| Same, mirrored camera | 11.1 mm |
+| Object 1.5 m away, `--object-distance 0.5` (scale 3× off) vs `1.5` | 33.9 mm vs 32.2 mm |
+
+¹ The textured test scene is slower to render (~24 Hz loop instead of 50 Hz), hence the higher numbers than the plain wall.
 
 The simulated camera has no latency; expect a lower usable gain on the real robot.
 

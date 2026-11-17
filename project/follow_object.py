@@ -5,7 +5,9 @@ The camera is mounted on the tool and looks along the tool Z axis (down at the t
   2. measure its offset from the image centre,
   3. turn that offset into a TCP velocity in the robot base frame (proportional control),
   4. integrate the velocity into a target pose and stream it with servoL at 50 Hz.
-The TCP keeps a fixed height and orientation; only X and Y are servoed.
+The TCP keeps its orientation and moves in a plane at right angles to the camera's view: base X/Y
+for a camera looking down, or, with --start-here, the start pose's tool X/Y (a camera looking
+forward then moves sideways and up/down, never toward the object).
 
 Modes
   --sim            Synthetic camera rendered from URSim's actual TCP pose, with a virtual coloured
@@ -19,9 +21,9 @@ Modes
                    webcam and the robot goes after it. Inset: webcam + tool camera footprint.
   --start-here     Real robot: jog the camera above the table with the pendant first. Follows at the
                    current height and orientation, inside a +-RADIUS box around the current XY.
-  --calibrate      Before following, move +-2 cm in X and Y and measure how a still object moves in
-                   the image (image Jacobian). Use it on the real robot: no need to know how the
-                   camera is mounted.
+  --calibrate      Before following, move +-5 cm along both plane axes and measure how a still object
+                   moves in the image (image Jacobian), then save it. Use it on the real robot: no need
+                   to know how the camera is mounted. --load-calib reuses the saved one (no moves).
   --no-robot       Detection and computed velocity only, no robot connection (tune HSV ranges here).
 
 Examples (URSim running, see ursim/bringup.sh):
@@ -33,7 +35,7 @@ Examples (URSim running, see ursim/bringup.sh):
 See README.md (repository root) for every option and parameter.
 Real robot (camera on the tool, object visible and still, hand on the e-stop):
     uv run python project/follow_object.py --ip <ROBOT_IP> --camera realsense --start-here --calibrate \
-        --max-speed 0.05 --gain 1.5 --color red
+        --max-speed 0.02 --gain 1.5 --color red
 Keys: q / Esc quit, space pause (sim object motion), click: move the sim object.
 """
 import argparse
@@ -62,7 +64,7 @@ DT = 0.02                               # s, control period (50 Hz)
 GAIN = 1.0                              # 1/s, proportional gain: v = GAIN * offset (+ feedforward)
 FEEDFORWARD = 0.3                       # 0..1, add the estimated object velocity (0 = pure P control)
 VEL_FILTER = 0.15                       # 0..1, low-pass on the object velocity estimate
-MAX_SPEED = 0.05                        # m/s, TCP speed cap (kept low for safety)
+MAX_SPEED = 0.02                        # m/s, TCP speed cap (kept low for safety; also used for calibration moves)
 MAX_ACCEL = 0.15                        # m/s², limit on velocity changes
 DEADBAND_PX = 4                         # px, ignore smaller errors (detection jitter)
 ERROR_FILTER = 0.5                      # 0..1, low-pass on the measured offset (1 = no filter)
@@ -122,26 +124,36 @@ def pose_rotation(pose):
 
 
 # ------------------------------------------------------------------ control
-class Follower:
-    """Image offset -> base-frame XY velocity, with deadband, filter, speed and accel limits."""
+BASE_XY = np.array([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
 
-    def __init__(self):
+
+class Follower:
+    """Image offset -> TCP velocity in the servo plane, with deadband, filter, speed and accel limits.
+
+    The servo plane is spanned by the two columns of A (unit vectors in the base frame) through
+    `origin`: base X/Y for a camera looking down in URSim, the start pose's tool X/Y with
+    --start-here (the plane at right angles to the camera's view, whichever way it looks).
+    Velocities and positions below are 2D coordinates in that plane.
+    """
+
+    def __init__(self, A=BASE_XY, origin=(0.0, 0.0, 0.0)):
+        self.A, self.origin = np.asarray(A, float), np.asarray(origin, float)
         self.err = None          # filtered offset (normalised image coordinates)
-        self.v = np.zeros(2)     # current commanded XY velocity, m/s
+        self.v = np.zeros(2)     # current commanded velocity in the plane, m/s
         self.last_seen = -1e9
-        self.obj = None          # (time, estimated object XY in the base frame)
+        self.obj = None          # (time, estimated object position in the plane)
         self.v_obj = np.zeros(2) # filtered object velocity estimate, m/s
         self.J = None            # measured image Jacobian (px per m of TCP motion), see calibrate()
         self.f = None            # focal length, px
 
     def offset_base(self, err, tcp_pose):
-        """Normalised image offset -> XY offset (m) from the point under the camera to the object."""
+        """Normalised image offset -> offset (m, plane coordinates) from the camera axis to the object."""
         if self.J is not None:
             # moving the TCP by d shifts the object by J d pixels: it is centred when J d = -offset
             return -np.linalg.solve(self.J, np.asarray(err) * self.f)
         depth = max(tcp_pose[2] - OBJECT_Z, 0.05)
         offset_cam = np.array([err[0] * depth, err[1] * depth, 0.0])
-        return (pose_rotation(tcp_pose) @ tool_to_cam() @ offset_cam)[:2]
+        return self.A.T @ (pose_rotation(tcp_pose) @ tool_to_cam() @ offset_cam)
 
     def update(self, det, K, tcp_pose, now):
         self.f = K[0, 0]
@@ -149,8 +161,8 @@ class Follower:
             u, v = det[0] - K[0, 2], det[1] - K[1, 2]
             e = np.array([u / K[0, 0], v / K[1, 1]])
             self.err = e if self.err is None else ERROR_FILTER * e + (1 - ERROR_FILTER) * self.err
-            # object position = point under the camera + offset; its derivative is the object velocity
-            obj = np.asarray(tcp_pose[:2]) + self.offset_base(e, tcp_pose)
+            # object position = camera axis + offset; its derivative is the object velocity
+            obj = self.A.T @ (np.asarray(tcp_pose[:3]) - self.origin) + self.offset_base(e, tcp_pose)
             if self.obj is not None and now - self.obj[0] < LOST_TIMEOUT:
                 dt = now - self.obj[0]
                 if dt > 1e-3:
@@ -373,60 +385,196 @@ def robot_fault(rtde_r):
     return rtde_r.isProtectiveStopped() or rtde_r.isEmergencyStopped() or rtde_r.getSafetyMode() != 1
 
 
-def calibrate(rtde_c, rtde_r, cam, color, pose0, step=0.02):
-    """Measure the image Jacobian J (px per m): move the TCP +-step along base X and Y and watch
-    how a STILL object shifts in the image. Replaces CAM_YAW_DEG / CAM_FLIP / CAM_HFOV_DEG."""
+CALIB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'follow_calibration.json')
+
+
+def calibrate(rtde_c, rtde_r, cam, color, pose0, A=BASE_XY, step=0.05):
+    """Measure the image Jacobian J (px per m): move the TCP +-step along the two servo-plane axes
+    (columns of A) and watch how a STILL object shifts in the image.
+    Replaces CAM_YAW_DEG / CAM_FLIP / CAM_HFOV_DEG.
+
+    Robust to a slightly moving object: each position is the median of 20 frames, and for each axis
+    the object is measured at the start pose before and after the +-step moves. If it drifted, or the
+    + and - shifts are not mirror images of each other, the object moved and calibration is refused.
+    """
     if isinstance(cam, SimCamera):
         cam.paused, was_manual = True, cam.manual
         cam.manual = cam.object_xy()
 
-    def measure(n=8):
+    def measure(n=20, timeout=4.0):
         pts, last = [], None
-        t_end = time.time() + 3.0
+        t_end = time.time() + timeout
         while len(pts) < n and time.time() < t_end:
             frame, seq = cam.read(rtde_r.getActualTCPPose(), time.time())
             if seq != last:
                 last, d = seq, detect(frame, color)
                 if d is not None:
                     pts.append(d[:2])
-            time.sleep(0.01)
-        return np.mean(pts, axis=0) if len(pts) >= n // 2 else None
+            time.sleep(0.005)
+        return np.median(pts, axis=0) if len(pts) >= 0.7 * n else None
 
     def go(pose):
-        rtde_c.moveL(list(pose), 0.03, 0.2)
+        rtde_c.moveL(list(pose), MAX_SPEED, 0.2)
         time.sleep(0.4)          # let the camera's frames catch up with the robot
 
-    print(f'Calibrating: the object must stay still, the TCP moves +-{step * 100:.0f} cm in X and Y...')
+    def measure_or_fail(where):
+        m = measure()
+        if m is None:
+            raise RuntimeError(f'object not seen {where}: keep it in the middle of the image')
+        return m
+
+    print(f'Calibrating: keep the object STILL. The TCP moves +-{step * 100:.0f} cm along '
+          f'{np.round(A[:, 0], 2).tolist()} and {np.round(A[:, 1], 2).tolist()} (base frame)...')
     J = np.zeros((2, 2))
     try:
-        if measure() is None:
-            raise RuntimeError('object not visible at the start pose')
         for axis in (0, 1):
+            m0a = measure_or_fail('at the start pose')
             seen = []
             for sign in (+1, -1):
                 p = list(pose0)
-                p[axis] += sign * step
+                p[:3] = np.asarray(pose0[:3]) + sign * step * A[:, axis]
                 go(p)
-                m = measure()
-                if m is None:
-                    raise RuntimeError(f'object lost after moving {"XY"[axis]} {sign * step:+.2f} m')
-                seen.append(m)
+                seen.append(measure_or_fail(f'after moving {sign * step * 100:+.0f} cm along axis {axis + 1}'))
             go(pose0)
+            m0b = measure_or_fail('back at the start pose')
+            m0 = (m0a + m0b) / 2
+            shift = np.linalg.norm(seen[0] - seen[1]) / 2          # px per step
+            drift = np.linalg.norm(m0a - m0b)                      # object motion during this axis
+            asym = np.linalg.norm((seen[0] - m0) + (seen[1] - m0))  # + and - shifts should cancel
+            print(f'  axis {axis + 1}: shift {shift:.0f} px per {step * 100:.0f} cm, '
+                  f'object drift {drift:.1f} px, asymmetry {asym:.1f} px')
+            if shift < 10:
+                raise RuntimeError(f'object barely moved in the image ({shift:.0f} px): too far away, '
+                                   'or increase --calib-step')
+            if drift > 0.25 * shift or asym > 0.3 * shift:
+                raise RuntimeError('the object moved during calibration: rest it on something, '
+                                   'or hold it really still, and try again')
             J[:, axis] = (seen[0] - seen[1]) / (2 * step)
     finally:
         go(pose0)
         if isinstance(cam, SimCamera):
             cam.paused, cam.manual = False, was_manual
     cols = np.linalg.norm(J, axis=0)
-    if cols.min() < 200 or abs(np.linalg.det(J)) < 0.3 * cols.prod():
+    if abs(np.linalg.det(J)) < 0.3 * cols.prod():
         raise RuntimeError(f'Calibration unreliable (J = {J.round(0).tolist()} px/m): '
-                           'object too small / too far, or it moved')
-    # describe J as scale + rotation + mirror, to compare with the mounting you expect
-    mirrored = np.linalg.det(J) > 0      # a down-looking camera without mirror gives det < 0 here
+                           'the two axes give almost the same image direction')
+    describe_calibration(J, A, pose_rotation(pose0)[:, 2])
+    return J
+
+
+def scene_shift(img0, img1, min_matches=20):
+    """Median image displacement (px) of the scene between two frames, from ORB feature matches.
+
+    Points that do not move (parts of the tool in view) are ignored; the median makes it robust to
+    people moving in the scene. Returns None if there are too few matches.
+    """
+    orb = cv2.ORB_create(1500)
+    g0, g1 = (cv2.cvtColor(i, cv2.COLOR_BGR2GRAY) for i in (img0, img1))
+    k0, d0 = orb.detectAndCompute(g0, None)
+    k1, d1 = orb.detectAndCompute(g1, None)
+    if d0 is None or d1 is None:
+        return None
+    matches = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True).match(d0, d1)
+    if len(matches) < min_matches:
+        return None
+    d = np.array([np.subtract(k1[m.trainIdx].pt, k0[m.queryIdx].pt) for m in matches])
+    med = np.median(d, axis=0)
+    if np.linalg.norm(med) > 1.0:          # ignore what moves with the camera (stays at 0 px)
+        d = d[np.linalg.norm(d, axis=1) > 0.5]
+    # keep the matches that agree with the dominant motion, then take their median
+    med = np.median(d, axis=0)
+    good = d[np.linalg.norm(d - med, axis=1) < max(3.0, 0.3 * np.linalg.norm(med))]
+    return np.median(good, axis=0) if len(good) >= min_matches // 2 else None
+
+
+def calibrate_scene(rtde_c, rtde_r, cam, pose0, A, K, distance, step=0.05):
+    """Like calibrate(), but from the motion of the whole scene: no object needed.
+
+    The scene's shift gives the image directions (camera rotation, mirroring, signs) exactly. Its
+    magnitude depends on how far the background is, so the scale is set from the focal length and
+    the expected object distance instead: J = direction * f / distance.
+    """
+    def grab():
+        time.sleep(0.5)                    # let the camera's frames catch up with the robot
+        return cam.read(rtde_r.getActualTCPPose(), time.time())[0].copy()
+
+    def go(pose):
+        rtde_c.moveL(list(pose), MAX_SPEED, 0.2)
+
+    print(f'Calibrating from the scene (no object needed). The TCP moves +-{step * 100:.0f} cm along '
+          f'{np.round(A[:, 0], 2).tolist()} and {np.round(A[:, 1], 2).tolist()} (base frame)...')
+    J_scene = np.zeros((2, 2))
+    try:
+        for axis in (0, 1):
+            go(pose0); f0 = grab()
+            shifts = []
+            for sign in (+1, -1):
+                p = list(pose0)
+                p[:3] = np.asarray(pose0[:3]) + sign * step * A[:, axis]
+                go(p)
+                d = scene_shift(f0, grab())
+                if d is None:
+                    raise RuntimeError('not enough texture in the scene to measure its motion')
+                shifts.append(d)
+            go(pose0)
+            back = scene_shift(f0, grab())
+            shift = np.linalg.norm(shifts[0] - shifts[1]) / 2
+            asym = np.linalg.norm(shifts[0] + shifts[1])
+            drift = np.linalg.norm(back) if back is not None else float('inf')
+            print(f'  axis {axis + 1}: scene shift {shift:.1f} px per {step * 100:.0f} cm, '
+                  f'back-at-start {drift:.1f} px, asymmetry {asym:.1f} px')
+            if shift < 3:
+                raise RuntimeError(f'the scene barely moved ({shift:.1f} px): increase --calib-step')
+            if drift > 0.25 * shift or asym > 0.3 * shift:
+                raise RuntimeError('inconsistent scene motion (things moving in view?): try again')
+            J_scene[:, axis] = (shifts[0] - shifts[1]) / (2 * step)
+    finally:
+        go(pose0)
+    cols = np.linalg.norm(J_scene, axis=0)
+    if abs(np.linalg.det(J_scene)) < 0.3 * cols.prod():
+        raise RuntimeError(f'unreliable result (J = {J_scene.round(0).tolist()} px/m)')
+    J = J_scene / cols.mean() * K[0, 0] / distance
+    print(f'  background at ~{K[0, 0] / cols.mean():.1f} m; scale set for an object at {distance:.2f} m')
+    describe_calibration(J, A, pose_rotation(pose0)[:, 2])
+    return J
+
+
+def describe_calibration(J, A, view):
+    """Print J as scale + rotation + mirror, to compare with the mounting you expect."""
+    cols = np.linalg.norm(J, axis=0)
+    # an unmirrored camera gives det(J) the sign of (a1 x a2) . view direction
+    handed = np.sign(np.cross(A[:, 0], A[:, 1]) @ view)
+    mirrored = np.sign(np.linalg.det(J)) != handed
     print(f'Image Jacobian (px per m): {J.round(0).tolist()}')
-    print(f'  ~{1000 / cols.mean():.2f} mm per pixel at this height, '
-          f'image x axis = base ({J[0, 0] / cols[0]:+.2f}, {J[0, 1] / cols[1]:+.2f}) direction, '
+    print(f'  ~{1000 / cols.mean():.2f} mm per pixel at the object\'s distance, '
+          f'image x axis = plane ({J[0, 0] / cols[0]:+.2f}, {J[0, 1] / cols[1]:+.2f}) direction, '
           f'{"mirrored" if mirrored else "not mirrored"}')
+
+
+def save_calibration(path, J, A, pose0, step):
+    import json
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = dict(J=J.tolist(), plane=np.asarray(A).tolist(), view=pose_rotation(pose0)[:, 2].tolist(),
+                pose=list(pose0), step=step, created=time.strftime('%Y-%m-%d %H:%M:%S'))
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+    print(f'Calibration saved to {os.path.relpath(path)}')
+
+
+def load_calibration(path, A, pose0, max_angle_deg=10):
+    """Saved J, expressed in the current servo plane. Refuses if the camera now looks elsewhere."""
+    import json
+    with open(path) as f:
+        data = json.load(f)
+    view_now = pose_rotation(pose0)[:, 2]
+    angle = math.degrees(math.acos(np.clip(np.dot(view_now, data['view']), -1, 1)))
+    if angle > max_angle_deg:
+        raise RuntimeError(f'the camera looks {angle:.0f} deg away from where it was calibrated '
+                           f'({data["created"]}): run --calibrate again')
+    # plane coordinates now -> base displacement -> plane coordinates at calibration time
+    J = np.asarray(data['J']) @ (np.asarray(data['plane']).T @ np.asarray(A))
+    print(f'Loaded calibration from {os.path.relpath(path)} ({data["created"]}, view {angle:.1f} deg off)')
+    describe_calibration(J, A, view_now)
     return J
 
 
@@ -445,7 +593,7 @@ def draw_overlay(img, det, K, follower, v, status):
 
 
 def main():
-    global GAIN, MAX_SPEED, FOLLOW_Z, FEEDFORWARD, WORKSPACE
+    global GAIN, MAX_SPEED, FOLLOW_Z, FEEDFORWARD
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--sim', action='store_true', help='synthetic tool camera (closed loop with URSim)')
     ap.add_argument('--webcam-table', action='store_true',
@@ -465,6 +613,15 @@ def main():
                     help='with --start-here: half-size (m) of the XY box around the start pose')
     ap.add_argument('--calibrate', action='store_true',
                     help='measure the camera->robot mapping first (object must be visible and still)')
+    ap.add_argument('--calibrate-scene', action='store_true',
+                    help='calibrate from the motion of the whole scene: no object needed (hold it or not)')
+    ap.add_argument('--object-distance', type=float, default=0.5,
+                    help='m, typical camera-object distance, sets the scale for --calibrate-scene')
+    ap.add_argument('--calib-step', type=float, default=0.05,
+                    help='m, size of the calibration moves (bigger = less sensitive to a moving object)')
+    ap.add_argument('--load-calib', action='store_true',
+                    help='use the calibration saved by the last --calibrate (no calibration moves)')
+    ap.add_argument('--calib-file', default=CALIB_FILE, help='where --calibrate saves / --load-calib reads')
     ap.add_argument('--sim-mount', type=float, nargs=2, metavar=('YAW', 'FLIP'),
                     help='--sim only: true camera mounting (deg, 0/1), to test --calibrate')
     ap.add_argument('--headless', action='store_true', help='no window (for tests)')
@@ -485,10 +642,17 @@ def main():
         rtde_c, rtde_r = connect(args.ip)
         if args.start_here:
             start = list(rtde_r.getActualTCPPose())
-            x, y, r = start[0], start[1], args.radius
-            WORKSPACE = {'x': (x - r, x + r), 'y': (y - r, y + r)}
-            print(f'Following from the current pose: z={start[2]:.3f} m, '
-                  f'X in [{x - r:+.3f}, {x + r:+.3f}], Y in [{y - r:+.3f}, {y + r:+.3f}]')
+            R0 = pose_rotation(start)
+            plane = R0[:, :2]                  # tool X and Y: at right angles to the camera's view
+            looking_down = R0[2, 2] < -0.9
+            if not looking_down and not (args.calibrate or args.calibrate_scene or args.load_calib):
+                rtde_c.stopScript()
+                sys.exit('The camera does not look down: the default mapping assumes it does. '
+                         'Add --calibrate (object still), --calibrate-scene (no object), or --load-calib.')
+            print(f'Following from the current pose {np.round(start[:3], 3).tolist()} m, '
+                  f'camera looking {"down" if looking_down else "along " + str(np.round(R0[:, 2], 2).tolist())}; '
+                  f'moving in the plane of {np.round(plane[:, 0], 2).tolist()} and '
+                  f'{np.round(plane[:, 1], 2).tolist()}, +-{args.radius:.2f} m')
         else:
             seed = [math.radians(a) for a in HOME_SEED_DEG]
             q = rtde_c.getInverseKinematics(start, seed)
@@ -496,7 +660,16 @@ def main():
                 raise RuntimeError(f'No elbow-up IK solution near HOME_SEED_DEG for {start}')
             print(f'Moving (moveJ, slow) to start pose {START_XY} at z={FOLLOW_Z} m...')
             rtde_c.moveJ(q, 0.25, 0.25)  # rad/s, rad/s² — slow approach for safety
-    hold = start[2:]          # z, rx, ry, rz kept constant while following
+    if not args.start_here:
+        plane = BASE_XY
+    origin = np.asarray(start[:3], float)
+
+    def clamp_plane(c):
+        """Keep the target inside the allowed box: +-radius in the plane, or WORKSPACE (base XY)."""
+        if args.start_here:
+            return np.clip(c, -args.radius, args.radius)
+        x, y = clamp_xy(*(origin[:2] + c))
+        return np.array([x, y]) - origin[:2]
 
     if args.webcam_table:
         cam = WebcamTable(args.camera, args.color)
@@ -512,16 +685,39 @@ def main():
                     cam.manual = cam.pixel_to_table(x, y, state['pose'])
             cv2.setMouseCallback(window, on_mouse)
 
-    follower, K = Follower(), None
+    follower, K = Follower(plane, origin), None
     if args.calibrate:
         if not rtde_c:
             sys.exit('--calibrate needs the robot')
         try:
-            follower.J = calibrate(rtde_c, rtde_r, cam, args.color, start)
-        except Exception:
+            follower.J = calibrate(rtde_c, rtde_r, cam, args.color, start, plane, step=args.calib_step)
+        except RuntimeError as e:
+            print(f'Calibration failed: {e}')
             rtde_c.stopScript(); cam.close()
-            raise
-    target = np.array(start[:2], dtype=float)
+            sys.exit(1)
+        save_calibration(args.calib_file, follower.J, plane, start, args.calib_step)
+    elif args.calibrate_scene:
+        if not rtde_c:
+            sys.exit('--calibrate-scene needs the robot')
+        frame0 = cam.read(state['pose'], 0.0)[0]
+        try:
+            follower.J = calibrate_scene(rtde_c, rtde_r, cam, start, plane, intrinsics(frame0.shape[1], frame0.shape[0]),
+                                         args.object_distance, step=args.calib_step)
+        except RuntimeError as e:
+            print(f'Calibration failed: {e}')
+            rtde_c.stopScript(); cam.close()
+            sys.exit(1)
+        save_calibration(args.calib_file, follower.J, plane, start, args.calib_step)
+    elif args.load_calib:
+        try:
+            follower.J = load_calibration(args.calib_file, plane, start)
+        except (OSError, RuntimeError) as e:
+            print(f'Cannot use the saved calibration: {e}')
+            if rtde_c:
+                rtde_c.stopScript()
+            cam.close()
+            sys.exit(1)
+    target = np.zeros(2)      # position in the servo plane, relative to the start pose
     last_seq, det, frame = 0, None, None
     errors, t0, last_print, tick = [], time.time(), 0.0, 0
     try:
@@ -541,9 +737,9 @@ def main():
                 det, last_seq = detect(frame, args.color), seq
             v = follower.update(det if new else None, K, pose, now)
 
-            target = np.array(clamp_xy(*(target + v * DT)))
-            if rtde_c:
-                rtde_c.servoL([*target, *hold], 0.0, 0.0, DT, 0.1, 300)
+            target = clamp_plane(target + v * DT)
+            if rtde_c:   # orientation stays the start orientation
+                rtde_c.servoL([*(origin + plane @ target), *start[3:]], 0.0, 0.0, DT, 0.1, 300)
 
             if args.sim:  # ground-truth error: object vs. point under the camera
                 below = cam.pixel_to_table(K[0, 2], K[1, 2], pose)
@@ -553,7 +749,7 @@ def main():
             if now - last_print > 1.0:
                 last_print = now
                 extra = f'  err {errors[-1][1]*1000:5.1f} mm' if errors else ''
-                print(f't={now:5.1f}s {status:8s} tcp=({pose[0]:+.3f}, {pose[1]:+.3f}) '
+                print(f't={now:5.1f}s {status:8s} tcp=({pose[0]:+.3f}, {pose[1]:+.3f}, {pose[2]:+.3f}) '
                       f'v=({v[0]:+.3f}, {v[1]:+.3f}) m/s{extra}')
 
             tick += 1
