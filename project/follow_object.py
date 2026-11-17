@@ -31,7 +31,7 @@ Examples (URSim running, see ursim/bringup.sh):
     uv run python project/follow_object.py --no-robot --color blue      # webcam, no robot
     uv run python project/follow_object.py --no-robot --color blue \
         --camera /dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_435i_Intel_R__RealSense_TM__Depth_Camera_435i_143523061441-video-index0
-See project/README.md for every option and parameter.
+See README.md (repository root) for every option and parameter.
 Real robot (camera on the tool, object visible and still, hand on the e-stop):
     uv run python project/follow_object.py --ip <ROBOT_IP> --camera <path> --start-here --calibrate \
         --max-speed 0.05 --gain 1.5 --color red
