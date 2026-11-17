@@ -47,14 +47,10 @@ All commands run from the repository root.
 | Simulated tool camera in URSim (closed loop) | `uv run python project/follow_object.py --sim` |
 | Self-test, prints the tracking error | `uv run python project/follow_object.py --sim --headless --duration 25` |
 | PC webcam with URSim | `uv run python project/follow_object.py --webcam-table --color red` |
-| Check detection only, no robot | `uv run python project/follow_object.py --no-robot --color blue --camera "$RS"` |
+| Check detection only, no robot | `uv run python project/follow_object.py --no-robot --color blue --camera realsense` |
 | **Real robot** | see [Real robot](#real-robot) |
 
-`$RS` is the RealSense colour stream (see [Cameras](#cameras)):
-
-```bash
-RS=/dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_435i_Intel_R__RealSense_TM__Depth_Camera_435i_143523061441-video-index0
-```
+`--camera realsense` finds the RealSense colour stream by itself (see [Cameras](#cameras)).
 
 **Keys** (in the window): `q` / `Esc` quit · `space` pause the simulated object · click to move the
 simulated object (`--sim`).
@@ -79,7 +75,7 @@ close that loop.
 | `--sim` | off | Simulated tool camera (needs URSim). |
 | `--webcam-table` | off | PC webcam on the virtual table (needs URSim). |
 | `--no-robot` | off | Don't connect to the robot. Not allowed with `--sim`, `--webcam-table` or `--calibrate`. |
-| `--camera` | `0` | Camera index or device path. |
+| `--camera` | `0` | Camera index, device path, or `realsense` (finds the RealSense colour stream under `/dev/v4l/by-id`). |
 | `--color` | `red` | `red`, `yellow`, `green` or `blue`. |
 | `--ip` | `127.0.0.1` | Robot IP. Any IP other than `127.0.0.1`/`localhost` requires `--start-here`. |
 | `--gain` | `3.0` | Proportional gain (1/s): velocity = gain × offset. Lower it if the robot oscillates. |
@@ -130,7 +126,7 @@ Constants at the top of `follow_object.py`:
 | Device | Camera |
 |---|---|
 | `/dev/video0` | Laptop webcam (1080p FHD) |
-| `/dev/video6` | RealSense D435i, **colour** (use the stable `/dev/v4l/by-id/...-video-index0` path, video numbers can change when replugged) |
+| `/dev/video6` | RealSense D435i, **colour**. Use `--camera realsense`: the video number can change when replugged, and the by-id name only includes the serial number when the camera reports it. |
 | `/dev/video4` | RealSense D435i, infrared (grey) |
 
 **Colour choice with the RealSense:** the teach pendant's blue-green body triggers both `blue` and
@@ -146,13 +142,13 @@ The RealSense is mounted on the tool, so the default mode closes the loop for re
    pendant out of view.
 2. Check detection without the robot:
    ```bash
-   uv run python project/follow_object.py --no-robot --color red --camera "$RS"
+   uv run python project/follow_object.py --no-robot --color red --camera realsense
    ```
 3. Put the object under the camera and leave it still. Keep a hand on the e-stop. First run, slow
    and in a small box:
    ```bash
    uv run python project/follow_object.py --ip <ROBOT_IP> --start-here --calibrate \
-       --max-speed 0.05 --gain 1.5 --radius 0.10 --color red --camera "$RS"
+       --max-speed 0.05 --gain 1.5 --radius 0.10 --color red --camera realsense
    ```
    `--calibrate` makes four slow 2 cm moves, prints the measured mapping (mm per pixel, image axis
    direction, mirrored or not) and refuses to start if the object left the view or moved.

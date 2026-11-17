@@ -29,11 +29,10 @@ Examples (URSim running, see ursim/bringup.sh):
     uv run python project/follow_object.py --sim --headless --duration 30   # self-test, prints error
     uv run python project/follow_object.py --webcam-table --color red   # PC webcam + URSim
     uv run python project/follow_object.py --no-robot --color blue      # webcam, no robot
-    uv run python project/follow_object.py --no-robot --color blue \
-        --camera /dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_435i_Intel_R__RealSense_TM__Depth_Camera_435i_143523061441-video-index0
+    uv run python project/follow_object.py --no-robot --color blue --camera realsense
 See README.md (repository root) for every option and parameter.
 Real robot (camera on the tool, object visible and still, hand on the e-stop):
-    uv run python project/follow_object.py --ip <ROBOT_IP> --camera <path> --start-here --calibrate \
+    uv run python project/follow_object.py --ip <ROBOT_IP> --camera realsense --start-here --calibrate \
         --max-speed 0.05 --gain 1.5 --color red
 Keys: q / Esc quit, space pause (sim object motion), click: move the sim object.
 """
@@ -188,11 +187,27 @@ def clamp_xy(x, y):
 
 
 # ------------------------------------------------------------------ cameras
+def resolve_camera(name):
+    """'0' -> 0, 'realsense' -> the RealSense colour stream, anything else -> device path."""
+    name = str(name)
+    if name.isdigit():
+        return int(name)
+    if name.lower() == 'realsense':
+        # by-id names include the serial number only when the camera reports it, so match loosely;
+        # video-index0 is the colour stream (index2 is infrared)
+        import glob
+        paths = sorted(glob.glob('/dev/v4l/by-id/*RealSense*-video-index0'))
+        if not paths:
+            raise RuntimeError('No RealSense found under /dev/v4l/by-id (check the USB cable)')
+        return paths[0]
+    return name
+
+
 class Webcam:
     """Grabs frames in a thread so the 50 Hz control loop never blocks on the camera."""
 
     def __init__(self, index):
-        index = int(index) if str(index).isdigit() else str(index)
+        index = resolve_camera(index)
         self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
         if not self.cap.isOpened():
             raise RuntimeError(f'Cannot open camera {index}')
@@ -430,7 +445,7 @@ def main():
                     help='PC webcam image laid on the virtual table, seen by the tool camera (closed loop with URSim)')
     ap.add_argument('--no-robot', action='store_true', help='do not connect to the robot')
     ap.add_argument('--camera', default='0',
-                    help='index or device path, e.g. /dev/v4l/by-id/...RealSense...-video-index0 (colour stream)')
+                    help="index, device path, or 'realsense' (finds the RealSense colour stream)")
     ap.add_argument('--color', default='red', choices=list(COLOR_RANGES))
     ap.add_argument('--ip', default=ROBOT_IP)
     ap.add_argument('--gain', type=float, default=GAIN)
