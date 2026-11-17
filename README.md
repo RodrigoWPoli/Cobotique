@@ -5,7 +5,7 @@ its pixel position is mapped to robot coordinates, and the UR5e's TCP keeps trac
 
 The repository has the building blocks for this: forward kinematics, safe joint and linear moves, camera to
 robot calibration and colour detection. They run against a real UR5e or the URSim simulator. It builds on the
-"IA et Cobotique" workshop at Telecom Nancy, whose notebooks are in `notebooks/`.
+"IA et Cobotique" workshop at Telecom Nancy, whose material (decks, notebooks) is kept locally in the git-ignored `workshop/` folder.
 
 ## Setup
 
@@ -35,8 +35,8 @@ Polyscope GUI: http://localhost:6080/vnc.html. Remote Control is already enabled
 | `data/` | Calibration images and `homography.npy` (git-ignored; specific to each setup) |
 | `tests/` | pytest suite |
 | `compose.yaml`, `ursim/` | URSim 5.26 container (image pinned by digest), programs and URCaps volumes |
-| `notebooks/` | Workshop notebooks (Day 1–2); open them from there, model files are read from `../` |
-| `*.pptx` | Workshop lecture decks (stored in Git LFS) |
+| `project/` | **Object following**: `follow_object.py` and its README (all commands and parameters) |
+| `workshop/` | Workshop decks and notebooks, kept locally and git-ignored |
 
 ## Usage
 

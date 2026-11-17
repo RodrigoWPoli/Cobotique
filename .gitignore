@@ -23,3 +23,6 @@ ursim/programs/*.old
 
 # Claude Code
 .claude/worktrees/
+
+# Workshop material (decks, Day notebooks, tools): kept locally, not part of the project
+workshop/
