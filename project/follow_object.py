@@ -208,9 +208,16 @@ class Webcam:
 
     def __init__(self, index):
         index = resolve_camera(index)
-        self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+        # V4L2 is Linux-only; on macOS use AVFoundation (OpenCV default backend).
+        if sys.platform.startswith('linux'):
+            self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+        else:
+            self.cap = cv2.VideoCapture(index)
         if not self.cap.isOpened():
-            raise RuntimeError(f'Cannot open camera {index}')
+            raise RuntimeError(
+                f'Cannot open camera {index}. '
+                'On macOS: allow Camera for Terminal/Cursor, or try --camera 0 / --sim'
+            )
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         ok, frame = self.cap.read()
