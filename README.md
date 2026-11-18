@@ -2,7 +2,6 @@
 
 ### TLDR:
 
-Before each session: `sudo tailscale down` (see [Network](#network)), hand within reach of the e-stop.
 
 **Once per machine** (`data/`, where the home pose and calibration are saved, is not in git):
 
