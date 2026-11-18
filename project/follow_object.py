@@ -224,6 +224,42 @@ class Follower:
         return self.err is not None
 
 
+
+class DepthFollower:
+    """Keep the object at `target` metres from the camera by moving along the camera's view axis.
+
+    Input: depth (m) measured at the detected object, or None. Output: velocity (m/s) along the
+    tool Z axis, positive = toward the object. Safe by default: no valid depth for LOST_TIMEOUT
+    brakes to zero, and a sudden jump (a hand passing in front, a depth hole) is ignored unless it
+    persists for several frames.
+    """
+
+    def __init__(self, target, gain, deadband=0.02, smooth=0.3, max_jump=0.15, jump_frames=5):
+        self.target, self.gain, self.deadband = target, gain, deadband
+        self.smooth, self.max_jump, self.jump_frames = smooth, max_jump, jump_frames
+        self.d = None            # filtered object distance, m
+        self.v = 0.0             # commanded velocity along tool Z, m/s
+        self.last_ok = -1e9
+        self.jumps = 0
+
+    def update(self, d_meas, now):
+        if d_meas is not None:
+            if self.d is None or abs(d_meas - self.d) < self.max_jump:
+                self.d = d_meas if self.d is None else self.smooth * d_meas + (1 - self.smooth) * self.d
+                self.last_ok, self.jumps = now, 0
+            else:
+                self.jumps += 1
+                if self.jumps >= self.jump_frames:   # a real change of distance, not a glitch
+                    self.d, self.last_ok, self.jumps = d_meas, now, 0
+        if now - self.last_ok > LOST_TIMEOUT:
+            self.d = None
+        e = 0.0 if self.d is None else self.d - self.target
+        v_des = self.gain * e if abs(e) > self.deadband else 0.0
+        dv = float(np.clip(v_des - self.v, -MAX_ACCEL * DT, MAX_ACCEL * DT))
+        self.v += dv
+        return self.v
+
+
 def clamp_xy(x, y):
     return (min(max(x, WORKSPACE['x'][0]), WORKSPACE['x'][1]),
             min(max(y, WORKSPACE['y'][0]), WORKSPACE['y'][1]))
@@ -269,7 +305,18 @@ class SimCamera:
         s = (OBJECT_Z - origin[2]) / ray[2]
         return origin[:2] + s * ray[:2]
 
+    def depth_at(self, u, v, window=None):
+        """Depth (m, along the optical axis) of the table point seen at pixel (u, v), like a RealSense."""
+        pose = getattr(self, 'last_pose', None)
+        if pose is None:
+            return None
+        x, y = self.pixel_to_table(u, v, pose)
+        R_cb, t_cb = self._extrinsics(pose)
+        z = float((R_cb @ np.array([x, y, OBJECT_Z]) + t_cb)[2])
+        return z if z > 0 else None
+
     def read(self, tcp_pose, now):
+        self.last_pose = list(tcp_pose)
         if self.last_now is not None and not self.paused:
             self.t += now - self.last_now
         self.last_now = now
@@ -594,10 +641,10 @@ def reachable_box(rtde_c, start, plane, radius, q_now, min_z=0.10, step=0.02, ma
     Walks outward from the start along each plane direction in `step` increments and stops at the
     first pose that is below min_z (base frame: the table), outside the safety limits, has no IK
     solution, or needs a joint to turn more
-    than max_joint_change_deg from now (a flip / near a singularity). Then checks the four corners
-    and pulls in any that fail. Uses getInverseKinematicsHasSolution first: asking
+    than max_joint_change_deg from now (a flip / near a singularity). Then checks the corners
+    (4 in 2D, 8 in 3D) and pulls in any that fail. Uses getInverseKinematicsHasSolution first: asking
     getInverseKinematics for an unreachable pose stops the robot's control script.
-    Returns (lo, hi): per-axis limits in plane coordinates.
+    Returns (lo, hi): per-axis limits, in the coordinates of the columns of `plane`.
     """
     origin, q_now = np.asarray(start[:3], float), np.asarray(q_now, float)
 
@@ -612,24 +659,26 @@ def reachable_box(rtde_c, start, plane, radius, q_now, min_z=0.10, step=0.02, ma
         q = rtde_c.getInverseKinematics(pose, list(q_now))
         return bool(q) and np.max(np.abs(np.asarray(q) - q_now)) < math.radians(max_joint_change_deg)
 
-    lo, hi = np.full(2, -radius), np.full(2, radius)
-    for axis in (0, 1):
+    import itertools
+    n = plane.shape[1]
+    lo, hi = np.full(n, -radius), np.full(n, radius)
+    for axis in range(n):
         for sign, lim in ((+1, hi), (-1, lo)):
             reach = 0.0
             for t in [*np.arange(step, radius - 1e-9, step), radius]:
-                c = np.zeros(2); c[axis] = sign * t
+                c = np.zeros(n); c[axis] = sign * t
                 if not ok(c):
                     break
                 reach = t
             lim[axis] = sign * (max(reach - margin, 0.0) if reach < radius else radius)
-    for _ in range(10):                           # corners: shrink the failing quadrant
-        bad = [(i, j) for i in (0, 1) for j in (0, 1)
-               if not ok([(lo, hi)[i][0], (lo, hi)[j][1]])]
+    for _ in range(10):                           # corners: shrink the failing ones
+        bad = [sel for sel in itertools.product((0, 1), repeat=n)
+               if not ok([(lo, hi)[k][a] for a, k in enumerate(sel)])]
         if not bad:
             break
-        for i, j in bad:
-            (lo, hi)[i][0] *= 0.85
-            (lo, hi)[j][1] *= 0.85
+        for sel in bad:
+            for a, k in enumerate(sel):
+                (lo, hi)[k][a] *= 0.85
     return lo, hi
 
 
@@ -729,6 +778,13 @@ def main():
     ap.add_argument('--radius', type=float, default=0.25,
                     help='with --start-here: how far (m) the target may go from the start along each '
                          'plane axis; reduced automatically where the arm cannot reach')
+    ap.add_argument('--follow-depth', action='store_true',
+                    help='also move along the camera axis to keep the object at --target-distance '
+                         '(needs a depth camera, e.g. --camera realsense, and --start-here or --home)')
+    ap.add_argument('--target-distance', type=float, default=0.5,
+                    help='m, camera-object distance kept with --follow-depth')
+    ap.add_argument('--depth-gain', type=float, default=1.0,
+                    help='1/s, gain of the distance controller (velocity = gain x distance error)')
     ap.add_argument('--min-z', type=float, default=0.10,
                     help='with --start-here: lowest TCP height (m, robot base frame) the target may reach, '
                          'to stay clear of the table the robot stands on')
@@ -795,15 +851,24 @@ def main():
     if not args.start_here:
         plane = BASE_XY
     origin = np.asarray(start[:3], float)
+    if args.follow_depth and not args.start_here:
+        if rtde_c:
+            rtde_c.stopScript()
+        sys.exit('--follow-depth needs --start-here or --home (it moves along the camera axis).')
+    if args.follow_depth and not 0.2 <= args.target_distance <= DEPTH_MAX_M:
+        sys.exit(f'--target-distance must be between 0.2 and {DEPTH_MAX_M} m')
+    # motion frame: the two plane axes, plus the camera's view axis (tool Z) with --follow-depth
+    motion = np.column_stack([plane, pose_rotation(start)[:, 2]]) if args.follow_depth else plane
 
-    box_lo, box_hi = np.full(2, -args.radius), np.full(2, args.radius)
+    box_lo, box_hi = np.full(motion.shape[1], -args.radius), np.full(motion.shape[1], args.radius)
     if args.start_here and rtde_c:
         if start[2] < args.min_z:
             rtde_c.stopScript()
             sys.exit(f'The TCP is at z={start[2]:.3f} m, below --min-z {args.min_z} m: jog it higher first.')
-        box_lo, box_hi = reachable_box(rtde_c, start, plane, args.radius, rtde_r.getActualQ(), min_z=args.min_z)
-        print(f'Allowed region around the start (m): axis 1 [{box_lo[0]:+.2f}, {box_hi[0]:+.2f}], '
-              f'axis 2 [{box_lo[1]:+.2f}, {box_hi[1]:+.2f}]'
+        box_lo, box_hi = reachable_box(rtde_c, start, motion, args.radius, rtde_r.getActualQ(), min_z=args.min_z)
+        names = ['axis 1', 'axis 2', 'camera axis (+ = toward the object)']
+        print('Allowed region around the start (m): '
+              + ', '.join(f'{names[k]} [{box_lo[k]:+.2f}, {box_hi[k]:+.2f}]' for k in range(len(box_lo)))
               + ('' if np.allclose(box_hi - box_lo, 2 * args.radius) else
                  f'  (reduced from +-{args.radius:.2f}: out of reach, or below --min-z {args.min_z} m)'))
 
@@ -811,6 +876,7 @@ def main():
         """Keep the target inside the allowed box (--start-here), or WORKSPACE (base XY)."""
         if args.start_here:
             return np.clip(c, box_lo, box_hi)
+        c = c[:2]
         x, y = clamp_xy(*(origin[:2] + c))
         return np.array([x, y]) - origin[:2]
 
@@ -879,12 +945,24 @@ def main():
             cam.close()
             sys.exit(1)
         follower.set_jacobian(J, distance_m)
-    target = np.zeros(2)      # position in the servo plane, relative to the start pose
+    if args.follow_depth and not hasattr(cam, 'depth_at'):
+        if rtde_c:
+            rtde_c.stopScript()
+        cam.close()
+        sys.exit('--follow-depth needs a camera with depth (use --camera realsense)')
+    depth_follower = DepthFollower(args.target_distance, args.depth_gain) if args.follow_depth else None
+    target = np.zeros(motion.shape[1])   # position along the motion axes, relative to the start pose
     last_seq, det, frame = 0, None, None
     errors, t0, last_print, tick = [], time.time(), 0.0, 0
+    # Pace the loop to DT with our own clock. Not rtde_c.initPeriod()/waitPeriod(): those wait for the
+    # RTDE interface's period (2 ms at the e-series' 500 Hz), so the loop ran at ~130 Hz and the
+    # target, advanced by v * DT per step, moved 2-3x faster than --max-speed.
+    next_tick, last_step = time.perf_counter(), None
     try:
         while True:
-            t_start = rtde_c.initPeriod() if rtde_c else None
+            step_start = time.perf_counter()
+            dt = DT if last_step is None else min(step_start - last_step, 2 * DT)   # measured step
+            last_step = step_start
             now = time.time() - t0
             pose = rtde_r.getActualTCPPose() if rtde_r else state['pose']
             state['pose'] = pose
@@ -895,6 +973,7 @@ def main():
             if K is None:
                 K = camera_matrix(cam, frame)
             new = seq != last_seq
+            d = None
             if new:
                 det, last_seq = detect(frame, args.color), seq
                 if det is not None and hasattr(cam, 'depth_at'):
@@ -904,10 +983,15 @@ def main():
                     else:
                         follower.depth_now = d
             v = follower.update(det if new else None, K, pose, now)
+            if depth_follower:
+                v = np.append(v, depth_follower.update(d if new else None, now))
+                speed = np.linalg.norm(v)
+                if speed > MAX_SPEED:            # one cap on the combined 3D speed
+                    v = v * (MAX_SPEED / speed)
 
-            target = clamp_plane(target + v * DT)
+            target = clamp_plane(target + v * dt)   # measured dt: the speed cap holds even if the loop is late
             if rtde_c:   # orientation stays the start orientation
-                rtde_c.servoL([*(origin + plane @ target), *start[3:]], 0.0, 0.0, DT, 0.1, 300)
+                rtde_c.servoL([*(origin + motion @ target), *start[3:]], 0.0, 0.0, DT, 0.1, 300)
 
             if args.sim:  # ground-truth error: object vs. point under the camera
                 below = cam.pixel_to_table(K[0, 2], K[1, 2], pose)
@@ -918,8 +1002,13 @@ def main():
                 last_print = now
                 extra = f'  err {errors[-1][1]*1000:5.1f} mm' if errors else ''
                 depth = f'  d={follower.depth_now:.2f}m' if follower.depth_now is not None else ''
+                if depth_follower:
+                    dd = depth_follower.d
+                    depth = (f'  d={dd:.3f}m (target {args.target_distance:.2f})' if dd is not None
+                             else '  d=?  (no depth: not moving along the camera axis)')
+                vs = ', '.join(f'{x:+.3f}' for x in v)
                 print(f't={now:5.1f}s {status:8s} tcp=({pose[0]:+.3f}, {pose[1]:+.3f}, {pose[2]:+.3f}) '
-                      f'v=({v[0]:+.3f}, {v[1]:+.3f}) m/s{depth}{extra}')
+                      f'v=({vs}) m/s{depth}{extra}')
 
             tick += 1
             if not args.headless and tick % 2 == 0:   # display at 25 Hz
@@ -936,10 +1025,12 @@ def main():
                     cam.manual = None
             if args.duration and now > args.duration:
                 break
-            if rtde_c:
-                rtde_c.waitPeriod(t_start)
+            next_tick += DT
+            delay = next_tick - time.perf_counter()
+            if delay > 0:
+                time.sleep(delay)
             else:
-                time.sleep(max(0.0, DT - (time.time() - t0 - now)))
+                next_tick = time.perf_counter()     # late: don't try to catch up with a burst
     except KeyboardInterrupt:
         pass
     finally:

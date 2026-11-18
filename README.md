@@ -114,6 +114,9 @@ close that loop.
 | `--home` | off | Move slowly (`moveJ`, 0.25 rad/s) to the saved home pose, then follow from there (implies `--start-here`). Refuses if any joint would turn more than 45°: jog closer first. |
 | `--home-file` | `data/follow_home.json` | Where `--set-home` saves and `--home` reads (git-ignored). |
 | `--radius` | `0.25` | With `--start-here`: how far (m) the target may go from the start position along each plane axis. At start-up the box is **reduced automatically** where the arm can't reach (no IK solution, outside the safety limits, or a joint would turn more than 90°) or where the TCP would go below `--min-z`; the allowed region is printed. |
+| `--follow-depth` | off | Also move along the **camera axis** to keep the object at `--target-distance`, using the depth measured at the object. Needs a depth camera (`--camera realsense`) and `--start-here` or `--home`. Without valid depth (object lost, nothing in range) the robot does not move along that axis; a sudden depth jump (a hand in front, a depth hole) is ignored unless it lasts 5 frames. Deadband ±2 cm. The `--radius` box and reach check then cover all three axes, and `--max-speed` caps the combined 3D speed. |
+| `--target-distance` | `0.5` | Camera–object distance (m) kept with `--follow-depth`. |
+| `--depth-gain` | `1.0` | Gain (1/s) of the distance controller: velocity along the camera axis = gain × distance error. |
 | `--min-z` | `0.10` | With `--start-here`: lowest TCP height (m, robot base frame), to stay clear of the table the robot stands on. Raise it if the tool is long or there are objects on the table. |
 | `--calibrate` | off | Before following, move ±`--calib-step` along both plane axes and measure how a still object moves in the image (image Jacobian), then save it to `--calib-file`. The camera's mounting and the object's distance don't need to be known. Each position is the median of 20 frames; if the object drifts or the + and − shifts don't mirror each other, the object moved and calibration is refused. |
 | `--calibrate-scene` | off | Calibrate from the motion of the **whole scene** (ORB feature matches between frames): no object needed, so you can hold it in your hand, or not show it at all. Gives the image directions (rotation, mirroring) exactly; the scale comes from the focal length and RealSense depth (or `--object-distance` as fallback). Needs a textured scene (not a blank wall) and nothing large moving in view. Saves like `--calibrate`. |
@@ -246,6 +249,21 @@ Run `sudo tailscale down` while using the robot (`sudo tailscale up` afterwards)
 and the adapter addresses outside `100.64.0.0/10`.
 
 ## Test results (URSim)
+
+**Speed fix (18 Nov):** until then the control loop was paced with ur_rtde's `initPeriod()`/`waitPeriod()`,
+which wait for the RTDE interface's own period (2 ms on the e-series), not for the script's 20 ms. The
+loop ran at ~130 Hz while the target advanced as if it ran at 50 Hz, so the robot moved **2–3× faster
+than `--max-speed`**. The loop now paces itself to 50 Hz and advances the target by the measured time step.
+Peak TCP speed with `--max-speed 0.05` is now 5.4–5.8 cm/s (servo lag) instead of 12–13 cm/s. Results
+below that were measured before the fix are flattered by the extra speed.
+
+| `--follow-depth` test (forward camera, wall with a red disc, `--max-speed 0.05`) | Result |
+|---|---|
+| Wall at 0.62 m, target 0.5 m | approaches and holds 0.503–0.510 m |
+| Wall at 0.40 m | backs off to 0.491 m (stops at the ±2 cm deadband) |
+| Wall moving 0.55 ± 0.08 m (20 s period) | distance stays 0.48–0.52 m |
+| Every 10th depth reading a bogus 0.2 m | ignored, holds 0.509 m |
+| No depth at all | no motion along the camera axis (stays at 0.596 m) |
 
 Measured with the earlier, faster defaults (`--gain 3 --feedforward 1 --max-speed 0.15`); the current
 defaults are slower for safety, so the robot lags more behind a moving object.
