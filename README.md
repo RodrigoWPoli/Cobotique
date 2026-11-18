@@ -12,23 +12,24 @@ uv run python project/follow_object.py --ip 100.65.63.93 --set-home      # saves
 # 2. Calibrate from home and start following (moves the robot: 4 slow 5 cm moves, then follows).
 #    Hold the blue object ~50 cm in front of the camera; it may move during calibration.
 uv run python project/follow_object.py --ip 100.65.63.93 --home --calibrate-scene \
-    --max-speed 0.01 --gain 1.5 --color blue --camera realsense
+    --max-speed 0.01 --gain 1.5 --color blue --camera realsense --shape
 ```
 
 **Every time after that:**
 
 ```bash
 uv run python project/follow_object.py --ip 100.65.63.93 --home --load-calib \
-    --max-speed 0.01 --gain 1.5 --color blue --camera realsense
+    --max-speed 0.01 --gain 1.5 --color blue --camera realsense --shape
 ```
 
 If `--home` refuses ("jog the robot closer to it first"), jog the robot near the start position and run it
-again. Press `q` in the window to stop.
+again. Press `q` in the window to stop. `--shape` learns the silhouette from the newest photo in
+`data/` (the blue bin) and ignores other blue blobs. Drop `--shape` to follow any blob of that colour.
 
 **The UR5e follows a coloured object seen by a camera mounted on its tool** (eye-in-hand, image-based
 visual servoing). Each frame, `project/follow_object.py`:
 
-1. detects the object by colour (HSV, the same pipeline as Day 2),
+1. detects the object by colour (HSV, the same pipeline as Day 2). With `--shape`, only a blob whose silhouette matches a reference photo is kept,
 2. measures the object's offset from the image centre,
 3. turns that offset into a TCP velocity in the robot base frame: proportional control plus
    feedforward of the object's estimated velocity, with deadband, speed and acceleration limits,
@@ -104,6 +105,7 @@ close that loop.
 | `--no-robot` | off | Don't connect to the robot. Not allowed with `--sim`, `--webcam-table` or `--calibrate`. |
 | `--camera` | `0` | Camera index, device path, or `realsense` (librealsense colour + aligned depth; see [Cameras](#cameras)). |
 | `--color` | `red` | `red`, `yellow`, `green` or `blue`. |
+| `--shape [PHOTO]` | off | Also match the object's **silhouette**, learned from `PHOTO`. With no path, the newest image in `data/` is used. The object must be the largest blob of `--color` in that photo. Live, a colour blob is kept only if its outline stays close to that silhouette (aspect ratio, how filled it is, Hu moments). Size and in-plane rotation do not matter, so a circle, a long bar, or an irregular blue region is ignored. The window draws the matched contour in green and prints `shape 0.xx` (0 = identical, kept up to 1.0). |
 | `--ip` | `127.0.0.1` | Robot IP. Any IP other than `127.0.0.1`/`localhost` requires `--start-here`. |
 | `--gain` | `1.0` | Proportional gain (1/s): velocity = gain × offset. Lower it if the robot oscillates. |
 | `--feedforward` | `0.3` | 0–1. Adds the object's estimated velocity, which removes most of the lag on a moving object. `0` = pure P control. |
@@ -133,7 +135,7 @@ Without `--start-here`, the script first does a `moveJ` to a standard elbow-up p
 
 ## Parameters in the script
 
-Constants at the top of `follow_object.py`:
+Constants at the top of `follow_object.py` (detection constants live in `project/detection.py`):
 
 | Constant | Value | Meaning |
 |---|---|---|
@@ -156,8 +158,9 @@ Constants at the top of `follow_object.py`:
 | `CAM_HFOV_DEG` | `60` ° | Horizontal field of view, for the focal length. Not needed with `--calibrate`. |
 | `CAM_YAW_DEG` | `0` ° | Camera rotation about the tool Z axis. Not needed with `--calibrate`. |
 | `CAM_FLIP` | `False` | Image mirrored relative to the tool frame. Not needed with `--calibrate`. |
-| `COLOR_RANGES` | see code | HSV ranges per colour (OpenCV: H 0–179; red needs two ranges). |
-| `MIN_AREA` | `300` px² | Smaller blobs are ignored. |
+| `COLOR_RANGES` | see `project/detection.py` | HSV ranges per colour (OpenCV: H 0–179; red needs two ranges). |
+| `MIN_AREA` | `300` px² | Smaller blobs are ignored (`project/detection.py`). |
+| `SHAPE_MAX` | `1.0` | Max silhouette distance kept with `--shape` (`project/detection.py`). |
 | `WebcamTable.ZOOM` | `1.8` | `--webcam-table`: size of the webcam image on the table relative to the tool camera's view. |
 
 ## Cameras
@@ -304,6 +307,8 @@ The simulated camera has no latency; expect a lower usable gain on the real robo
 | `tests/` | pytest suite |
 | `compose.yaml`, `ursim/` | URSim 5.26 container (image pinned by digest), programs and URCaps volumes |
 | `project/follow_object.py` | **Object following** (this page) |
+| `project/detection.py` | HSV colour blobs + optional silhouette match (`--shape`) |
+| `project/camera.py` | Webcam / RealSense (colour + aligned depth) |
 | `workshop/` | Workshop decks and notebooks, kept locally and git-ignored |
 
 ### Usage

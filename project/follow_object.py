@@ -1,7 +1,8 @@
 """Make the UR5 follow a coloured object with an eye-in-hand camera (image-based visual servoing).
 
 The camera is mounted on the tool and looks along the tool Z axis (down at the table). Each frame:
-  1. detect the object by colour (HSV, same pipeline as Day 2),
+  1. detect the object by colour (HSV, same pipeline as Day 2). With --shape, keep only the blob
+     whose silhouette matches a reference photo (scale and rotation do not matter),
   2. measure its offset from the image centre,
   3. turn that offset into a TCP velocity in the robot base frame (proportional control),
   4. integrate the velocity into a target pose and stream it with servoL at 50 Hz.
@@ -25,6 +26,9 @@ Modes
                    moves in the image (image Jacobian), then save it. Use it on the real robot: no need
                    to know how the camera is mounted. --load-calib reuses the saved one (no moves).
   --no-robot       Detection and computed velocity only, no robot connection (tune HSV ranges here).
+  --shape [PHOTO]  Also match the object's silhouette. PHOTO is a picture where the object is the
+                   largest blob of --color (default: the newest image in data/). A blue circle or
+                   a long bar is ignored; a blob the same shape as the photo is kept.
 
 Examples (URSim running, see ursim/bringup.sh):
     uv run python project/follow_object.py --sim
@@ -49,6 +53,7 @@ import cv2
 import numpy as np
 
 from camera import DEPTH_MAX_M, DEPTH_MIN_M, Webcam, open_camera
+from detection import COLOR_RANGES, DRAW_BGR, detect, learn_shape, resolve_shape_photo
 
 # ------------------------------------------------------------------ configuration
 ROBOT_IP = '127.0.0.1'
@@ -74,34 +79,6 @@ LOST_TIMEOUT = 0.5                      # s without detection before the robot s
 CAM_HFOV_DEG = 60.0                     # horizontal field of view, for cameras that don't report their intrinsics
 CAM_YAW_DEG = 0.0                       # camera rotation about the tool Z axis (mounting)
 CAM_FLIP = False                        # True if the image is mirrored relative to the tool frame
-
-# HSV ranges (OpenCV: H 0..179); red wraps around so it needs two ranges
-COLOR_RANGES = {
-    'red':    [((0, 120, 70), (10, 255, 255)), ((170, 120, 70), (179, 255, 255))],
-    'yellow': [((20, 100, 100), (35, 255, 255))],
-    'green':  [((40, 80, 50), (85, 255, 255))],
-    'blue':   [((100, 150, 50), (130, 255, 255))],
-}
-DRAW_BGR = {'red': (0, 0, 255), 'yellow': (0, 220, 220), 'green': (0, 200, 0), 'blue': (255, 0, 0)}
-MIN_AREA = 300                          # px²
-
-
-# ------------------------------------------------------------------ perception
-def detect(img, color):
-    """Largest blob of `color`: (cx, cy, area) in pixels, or None."""
-    hsv = cv2.cvtColor(cv2.GaussianBlur(img, (5, 5), 0), cv2.COLOR_BGR2HSV)
-    mask = np.zeros(hsv.shape[:2], np.uint8)
-    for lo, hi in COLOR_RANGES[color]:
-        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
-    kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    best = max(contours, key=cv2.contourArea, default=None)
-    if best is None or cv2.contourArea(best) < MIN_AREA:
-        return None
-    m = cv2.moments(best)
-    return m['m10'] / m['m00'], m['m01'] / m['m00'], m['m00']
 
 
 def intrinsics(w, h, hfov_deg=CAM_HFOV_DEG):
@@ -462,7 +439,7 @@ def go_home(rtde_c, rtde_r, path):
     rtde_c.moveJ(home['q'], 0.25, 0.25)
 
 
-def calibrate(rtde_c, rtde_r, cam, color, pose0, A=BASE_XY, step=0.05):
+def calibrate(rtde_c, rtde_r, cam, color, pose0, A=BASE_XY, step=0.05, shape=None):
     """Measure the image Jacobian J (px per m): move the TCP +-step along the two servo-plane axes
     (columns of A) and watch how a STILL object shifts in the image.
     Replaces CAM_YAW_DEG / CAM_FLIP / CAM_HFOV_DEG.
@@ -481,7 +458,7 @@ def calibrate(rtde_c, rtde_r, cam, color, pose0, A=BASE_XY, step=0.05):
         while len(pts) < n and time.time() < t_end:
             frame, seq = cam.read(rtde_r.getActualTCPPose(), time.time())
             if seq != last:
-                last, d = seq, detect(frame, color)
+                last, d = seq, detect(frame, color, shape)
                 if d is not None:
                     pts.append(d[:2])
             time.sleep(0.005)
@@ -744,6 +721,8 @@ def draw_overlay(img, det, K, follower, v, status):
     cv2.drawMarker(img, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS, 30, 1)
     if det is not None:
         p = (int(det[0]), int(det[1]))
+        if det[3] is not None:
+            cv2.drawContours(img, [det[3]], -1, (0, 255, 0), 2)
         cv2.circle(img, p, 8, (255, 255, 255), 2)
         cv2.line(img, (cx, cy), p, (255, 255, 255), 1)
     depth = f'  d={follower.depth_now:.2f}m' if follower.depth_now is not None else ''
@@ -762,6 +741,9 @@ def main():
     ap.add_argument('--camera', default='0',
                     help="index, device path, or 'realsense' (librealsense colour+depth)")
     ap.add_argument('--color', default='red', choices=list(COLOR_RANGES))
+    ap.add_argument('--shape', nargs='?', const='auto', default=None, metavar='PHOTO',
+                    help='also match the silhouette from PHOTO (default: newest image in data/). '
+                         'The object must be the largest blob of --color in that photo')
     ap.add_argument('--ip', default=ROBOT_IP)
     ap.add_argument('--gain', type=float, default=GAIN)
     ap.add_argument('--feedforward', type=float, default=FEEDFORWARD)
@@ -814,6 +796,13 @@ def main():
     if not local and not args.no_robot and not (args.start_here or args.set_home):
         sys.exit('Real robot: use --start-here (jog the camera above the table first). '
                  'The preset start pose and workspace are for URSim only.')
+
+    shape = None
+    if args.shape:
+        try:
+            shape = learn_shape(resolve_shape_photo(args.shape), args.color)
+        except (OSError, RuntimeError) as e:
+            sys.exit(f'--shape: {e}')
 
     rtde_c = rtde_r = None
     start = [*START_XY, FOLLOW_Z, *TOOL_DOWN]
@@ -911,7 +900,8 @@ def main():
         if not rtde_c:
             sys.exit('--calibrate needs the robot')
         try:
-            J, distance_m = calibrate(rtde_c, rtde_r, cam, args.color, start, plane, step=args.calib_step)
+            J, distance_m = calibrate(rtde_c, rtde_r, cam, args.color, start, plane,
+                                      step=args.calib_step, shape=shape)
         except RuntimeError as e:
             print(f'Calibration failed: {e}')
             rtde_c.stopScript(); cam.close()
@@ -975,7 +965,7 @@ def main():
             new = seq != last_seq
             d = None
             if new:
-                det, last_seq = detect(frame, args.color), seq
+                det, last_seq = detect(frame, args.color, shape), seq
                 if det is not None and hasattr(cam, 'depth_at'):
                     d = cam.depth_at(det[0], det[1], window=11)
                     if follower.J_calib is not None:
@@ -1010,6 +1000,8 @@ def main():
                 errors.append((now, np.linalg.norm(below - cam.object_xy())))
 
             status = 'TRACKING' if follower.tracking else 'LOST'
+            if det is not None and det[4] is not None:
+                status += f'  shape {det[4]:.2f}'
             if now - last_print > 1.0:
                 last_print = now
                 extra = f'  err {errors[-1][1]*1000:5.1f} mm' if errors else ''
