@@ -138,6 +138,12 @@ class RealSenseCamera:
             raise RuntimeError(f'Cannot start RealSense: {e}.{hint}') from e
         depth_sensor = profile.get_device().first_depth_sensor()
         self.depth_scale = depth_sensor.get_depth_scale()
+        # Factory-calibrated colour intrinsics (depth is aligned to colour, so these apply to both).
+        intr = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+        self.K = np.array([[intr.fx, 0.0, intr.ppx], [0.0, intr.fy, intr.ppy], [0.0, 0.0, 1.0]])
+        hfov = 2 * np.degrees(np.arctan(intr.width / 2 / intr.fx))
+        print(f'  colour intrinsics: fx={intr.fx:.1f} fy={intr.fy:.1f} px, centre ({intr.ppx:.1f}, '
+              f'{intr.ppy:.1f}), HFOV {hfov:.1f} deg', flush=True)
         self.align = rs.align(rs.stream.color)
         self.frame = None
         self.depth = None          # float32 metres, same size as colour, 0 = invalid

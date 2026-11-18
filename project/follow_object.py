@@ -71,7 +71,7 @@ DEADBAND_PX = 4                         # px, ignore smaller errors (detection j
 ERROR_FILTER = 0.5                      # 0..1, low-pass on the measured offset (1 = no filter)
 LOST_TIMEOUT = 0.5                      # s without detection before the robot stops
 
-CAM_HFOV_DEG = 60.0                     # horizontal field of view, used for the focal length
+CAM_HFOV_DEG = 60.0                     # horizontal field of view, for cameras that don't report their intrinsics
 CAM_YAW_DEG = 0.0                       # camera rotation about the tool Z axis (mounting)
 CAM_FLIP = False                        # True if the image is mirrored relative to the tool frame
 
@@ -107,6 +107,16 @@ def detect(img, color):
 def intrinsics(w, h, hfov_deg=CAM_HFOV_DEG):
     f = (w / 2) / math.tan(math.radians(hfov_deg) / 2)
     return np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1]])
+
+
+def camera_matrix(cam, frame):
+    """The camera's own intrinsics if it reports them (RealSense, simulated cameras), else the
+    CAM_HFOV_DEG model. A plain webcam can't report its lens through OpenCV."""
+    K = getattr(cam, 'K', None)
+    h, w = frame.shape[:2]
+    if K is not None and abs(K[0, 2] - w / 2) < w / 4 and abs(K[1, 2] - h / 2) < h / 4:
+        return np.asarray(K, float)
+    return intrinsics(w, h)
 
 
 def cam_rotation(yaw_deg, flip):
@@ -148,7 +158,7 @@ class Follower:
         self.J_calib = None      # Jacobian at calibration distance
         self.distance_m = None   # object distance (m) when J_calib was measured
         self.depth_now = None    # last live depth (m) used for rescale / overlay
-        self.f = None            # focal length, px
+        self.fxy = None          # focal lengths (fx, fy), px
 
     def set_jacobian(self, J, distance_m=None):
         """Store the calibrated Jacobian and optional reference distance for live depth rescale."""
@@ -171,13 +181,13 @@ class Follower:
         """Normalised image offset -> offset (m, plane coordinates) from the camera axis to the object."""
         if self.J is not None:
             # moving the TCP by d shifts the object by J d pixels: it is centred when J d = -offset
-            return -np.linalg.solve(self.J, np.asarray(err) * self.f)
+            return -np.linalg.solve(self.J, np.asarray(err) * self.fxy)   # back to pixels
         depth = max(tcp_pose[2] - OBJECT_Z, 0.05)
         offset_cam = np.array([err[0] * depth, err[1] * depth, 0.0])
         return self.A.T @ (pose_rotation(tcp_pose) @ tool_to_cam() @ offset_cam)
 
     def update(self, det, K, tcp_pose, now):
-        self.f = K[0, 0]
+        self.fxy = np.array([K[0, 0], K[1, 1]])
         if det is not None:
             u, v = det[0] - K[0, 2], det[1] - K[1, 2]
             e = np.array([u / K[0, 0], v / K[1, 1]])
@@ -197,7 +207,7 @@ class Follower:
         if self.err is None:
             v_des = np.zeros(2)  # lost: brake
         else:
-            err = self.err if np.linalg.norm(self.err) * K[0, 0] >= DEADBAND_PX else np.zeros(2)
+            err = self.err if np.linalg.norm(self.err * self.fxy) >= DEADBAND_PX else np.zeros(2)
             v_des = GAIN * self.offset_base(err, tcp_pose) + FEEDFORWARD * self.v_obj
             speed = np.linalg.norm(v_des)
             if speed > MAX_SPEED:
@@ -850,7 +860,7 @@ def main():
         distance = measure_object_distance(cam, args.object_distance, frame=frame0)
         try:
             J, distance_m = calibrate_scene(
-                rtde_c, rtde_r, cam, start, plane, intrinsics(frame0.shape[1], frame0.shape[0]),
+                rtde_c, rtde_r, cam, start, plane, camera_matrix(cam, frame0),
                 distance, step=args.calib_step)
         except RuntimeError as e:
             print(f'Calibration failed: {e}')
@@ -883,7 +893,7 @@ def main():
 
             frame, seq = cam.read(pose, now)
             if K is None:
-                K = intrinsics(frame.shape[1], frame.shape[0])
+                K = camera_matrix(cam, frame)
             new = seq != last_seq
             if new:
                 det, last_seq = detect(frame, args.color), seq
