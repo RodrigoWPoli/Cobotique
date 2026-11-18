@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12, <3.14"
 
 [[package]]
@@ -267,6 +267,8 @@ dependencies = [
     { name = "opencv-python" },
     { name = "polars" },
     { name = "pyobjc-framework-avfoundation", marker = "sys_platform == 'darwin'" },
+    { name = "pyrealsense2", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "pyrealsense2-macosx", marker = "sys_platform == 'darwin'" },
     { name = "ur-rtde" },
 ]
 
@@ -285,6 +287,8 @@ requires-dist = [
     { name = "opencv-python", specifier = "<5" },
     { name = "polars", specifier = ">=2.1.0" },
     { name = "pyobjc-framework-avfoundation", marker = "sys_platform == 'darwin'", specifier = ">=13.0" },
+    { name = "pyrealsense2", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = ">=2.54.0" },
+    { name = "pyrealsense2-macosx", marker = "sys_platform == 'darwin'", specifier = ">=2.54.0" },
     { name = "ur-rtde", specifier = ">=1.6.5" },
 ]
 
@@ -1387,6 +1391,28 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e4/11/b213bebff182584360cb8d17c72c1677fec5c5c228de439e63bcf8ab1c8f/pyparsing-3.3.3.tar.gz", hash = "sha256:928ae7e20211f3b6f3915a72f06a0cfd29ab9d24279dd6346b6b1a7146397d36", size = 1050487, upload-time = "2026-09-20T20:59:05.609Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/bb/d215ee7c73b61497b28a5503f9f53523f294fcc936762b7caf90e0c1c2b5/pyparsing-3.3.3-py3-none-any.whl", hash = "sha256:ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4", size = 126420, upload-time = "2026-09-20T20:59:04.025Z" },
+]
+
+[[package]]
+name = "pyrealsense2"
+version = "2.59.2.11152"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/61/7b/e3db3b332285be200af5471e403d972c5e6b4025624d0fc24accde795761/pyrealsense2-2.59.2.11152-cp312-cp312-manylinux1_x86_64.whl", hash = "sha256:d857fac9394976f2153a2267112ed37cb025e979c62e7ac24bd0bfe753bc4b01", size = 13592712, upload-time = "2026-11-15T10:43:44.656Z" },
+    { url = "https://files.pythonhosted.org/packages/30/05/ac7949426a8760dda48064e52456953d41005df6db4fd66b8aa7d226cc64/pyrealsense2-2.59.2.11152-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:8cb93213c15ada1d2e31abe1ffcc424e70896db82b9781c08adc03df10547a72", size = 7273976, upload-time = "2026-11-15T10:43:51.127Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/e8/9c79c5894ad955146eec545c6eb800bead77778f324734524050bd465826/pyrealsense2-2.59.2.11152-cp312-cp312-win_amd64.whl", hash = "sha256:a70f9ba2482d2fe8cda29909573bbd242a4c0e55f4bd6db2ec776bbbbb7ba07f", size = 9433797, upload-time = "2026-11-15T10:43:59.123Z" },
+    { url = "https://files.pythonhosted.org/packages/3d/4f/18f7d37888a7dfa4cb086eade12e0857dc8f863738caefbf33bf0a30ad17/pyrealsense2-2.59.2.11152-cp313-cp313-manylinux1_x86_64.whl", hash = "sha256:19ab0c21bb7c99659d5104c816685c4418311699acef484a721a0cd2c58ebea7", size = 13592688, upload-time = "2026-11-15T10:44:09.808Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/ec/44127c67eac7a4b4f8aad00df3435bd32189d8562d44d995531adb364977/pyrealsense2-2.59.2.11152-cp313-cp313-win_amd64.whl", hash = "sha256:8a55587b672bc374b02e3e03fac07430aa4c07a4ebc4975abd4f10ab59330db6", size = 9434077, upload-time = "2026-11-15T10:44:16.279Z" },
+]
+
+[[package]]
+name = "pyrealsense2-macosx"
+version = "2.56.5"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/45/42/df369b9c8943395e8166dfc2006163279a850d7990e9c7fb7a0f0bdc4bbb/pyrealsense2_macosx-2.56.5-cp312-cp312-macosx_15_0_arm64.whl", hash = "sha256:7a0c2e124d74da97c3a928f0dc084c51f1473745a863db08cc2191bd2bdf8623", size = 4509608, upload-time = "2026-02-16T09:56:06.215Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/f4/b4a0741f8a5e77495e64a88985327515decd86c64553103bbf4b1e11a8b8/pyrealsense2_macosx-2.56.5-cp313-cp313-macosx_15_0_arm64.whl", hash = "sha256:606aa36debd6b1f6179d7ca866161c16d5b60c6a2dfd95eadd10f0d6eee56c02", size = 4510296, upload-time = "2026-02-16T09:56:07.639Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/fe/cae7d70604eb824c1800f8a3c94083c42b582bc47580f70a4954e1b3bc6c/pyrealsense2_macosx-2.56.5-cp313-cp313t-macosx_15_0_arm64.whl", hash = "sha256:244899dd086af774c8c76ae036a45eafa1dc54bb24b785903aa4a5aae7e5de22", size = 4645326, upload-time = "2026-02-16T09:56:09.576Z" },
 ]
 
 [[package]]

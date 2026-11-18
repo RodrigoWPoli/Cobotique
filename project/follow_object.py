@@ -42,12 +42,13 @@ import argparse
 import math
 import os
 import sys
-import threading
 import time
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'xcb')   # OpenCV's Qt only ships the X11 plugin
 import cv2
 import numpy as np
+
+from camera import DEPTH_MAX_M, DEPTH_MIN_M, Webcam, open_camera
 
 # ------------------------------------------------------------------ configuration
 ROBOT_IP = '127.0.0.1'
@@ -143,8 +144,28 @@ class Follower:
         self.last_seen = -1e9
         self.obj = None          # (time, estimated object position in the plane)
         self.v_obj = np.zeros(2) # filtered object velocity estimate, m/s
-        self.J = None            # measured image Jacobian (px per m of TCP motion), see calibrate()
+        self.J = None            # working image Jacobian (px per m), possibly rescaled by live depth
+        self.J_calib = None      # Jacobian at calibration distance
+        self.distance_m = None   # object distance (m) when J_calib was measured
+        self.depth_now = None    # last live depth (m) used for rescale / overlay
         self.f = None            # focal length, px
+
+    def set_jacobian(self, J, distance_m=None):
+        """Store the calibrated Jacobian and optional reference distance for live depth rescale."""
+        self.J_calib = np.asarray(J, float).copy()
+        self.J = self.J_calib.copy()
+        self.distance_m = None if distance_m is None else float(distance_m)
+        self.depth_now = self.distance_m
+
+    def apply_depth(self, d_now):
+        """Rescale J so mm/px stays right when the object distance changes: J ∝ 1/d."""
+        if self.J_calib is None or d_now is None:
+            return
+        d_now = float(np.clip(d_now, DEPTH_MIN_M, DEPTH_MAX_M))
+        if self.distance_m is None:
+            self.distance_m = d_now
+        self.J = self.J_calib * (self.distance_m / d_now)
+        self.depth_now = d_now
 
     def offset_base(self, err, tcp_pose):
         """Normalised image offset -> offset (m, plane coordinates) from the camera axis to the object."""
@@ -199,90 +220,6 @@ def clamp_xy(x, y):
 
 
 # ------------------------------------------------------------------ cameras
-def resolve_camera(name):
-    """'0' -> 0, 'realsense' -> the RealSense colour stream, anything else -> device path."""
-    name = str(name)
-    if name.isdigit():
-        return int(name)
-    if name.lower() == 'realsense':
-        if sys.platform == 'darwin':
-            return realsense_index_macos()
-        # by-id names include the serial number only when the camera reports it, so match loosely;
-        # video-index0 is the colour stream (index2 is infrared)
-        import glob
-        paths = sorted(glob.glob('/dev/v4l/by-id/*RealSense*-video-index0'))
-        if not paths:
-            raise RuntimeError('No RealSense found under /dev/v4l/by-id (check the USB cable)')
-        return paths[0]
-    return name
-
-
-def realsense_index_macos():
-    """OpenCV camera index of the RealSense on macOS.
-
-    OpenCV's AVFoundation backend lists AVFoundation video + muxed devices sorted by uniqueID, and
-    --camera N is the position in that list (opencv/modules/videoio/src/cap_avfoundation_mac.mm).
-    This builds the same list and finds the device named RealSense, preferring its RGB stream.
-    """
-    try:
-        import AVFoundation
-    except ImportError:
-        raise RuntimeError('--camera realsense on macOS needs pyobjc-framework-AVFoundation '
-                           '(installed by `uv sync`), or pass the camera number, e.g. --camera 1') from None
-    devices = (list(AVFoundation.AVCaptureDevice.devicesWithMediaType_(AVFoundation.AVMediaTypeVideo))
-               + list(AVFoundation.AVCaptureDevice.devicesWithMediaType_(AVFoundation.AVMediaTypeMuxed)))
-    devices.sort(key=lambda d: str(d.uniqueID()))
-    names = [str(d.localizedName()) for d in devices]
-    found = [i for i, n in enumerate(names) if 'realsense' in n.lower()]
-    if not found:
-        raise RuntimeError(f'No RealSense among the cameras: {names} (check the USB cable)')
-    rgb = [i for i in found if 'rgb' in names[i].lower() or 'color' in names[i].lower()]
-    index = (rgb or found)[0]
-    print(f'RealSense: camera {index} ({names[index]})')
-    return index
-
-
-class Webcam:
-    """Grabs frames in a thread so the 50 Hz control loop never blocks on the camera."""
-
-    def __init__(self, index):
-        index = resolve_camera(index)
-        # V4L2 is Linux-only; on macOS use AVFoundation (OpenCV default backend).
-        if sys.platform.startswith('linux'):
-            self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
-        else:
-            self.cap = cv2.VideoCapture(index)
-        if not self.cap.isOpened():
-            raise RuntimeError(
-                f'Cannot open camera {index}. '
-                'On macOS: allow Camera for Terminal/Cursor, or try --camera 0 / --sim'
-            )
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        ok, frame = self.cap.read()
-        if not ok:
-            raise RuntimeError('Camera read failed')
-        self.frame, self.seq, self.running = frame, 1, True
-        self.lock = threading.Lock()
-        threading.Thread(target=self._loop, daemon=True).start()
-
-    def _loop(self):
-        while self.running:
-            ok, frame = self.cap.read()
-            if ok:
-                with self.lock:
-                    self.frame, self.seq = frame, self.seq + 1
-
-    def read(self, tcp_pose, now):
-        with self.lock:
-            return self.frame, self.seq
-
-    def close(self):
-        self.running = False
-        time.sleep(0.05)
-        self.cap.release()
-
-
 class SimCamera:
     """Renders what a tool camera would see from the robot's actual TCP pose: a table grid and a disc."""
 
@@ -539,7 +476,14 @@ def calibrate(rtde_c, rtde_r, cam, color, pose0, A=BASE_XY, step=0.05):
         raise RuntimeError(f'Calibration unreliable (J = {J.round(0).tolist()} px/m): '
                            'the two axes give almost the same image direction')
     describe_calibration(J, A, pose_rotation(pose0)[:, 2])
-    return J
+    distance_m = None
+    if hasattr(cam, 'depth_at'):
+        obj = measure()
+        if obj is not None:
+            distance_m = cam.depth_at(obj[0], obj[1], window=11)
+            if distance_m is not None:
+                print(f'  RealSense depth at object: {distance_m:.2f} m')
+    return J, distance_m
 
 
 def scene_shift(img0, img1, min_matches=20):
@@ -616,7 +560,22 @@ def calibrate_scene(rtde_c, rtde_r, cam, pose0, A, K, distance, step=0.05):
     J = J_scene / cols.mean() * K[0, 0] / distance
     print(f'  background at ~{K[0, 0] / cols.mean():.1f} m; scale set for an object at {distance:.2f} m')
     describe_calibration(J, A, pose_rotation(pose0)[:, 2])
-    return J
+    return J, distance
+
+
+def measure_object_distance(cam, fallback, frame=None):
+    """Depth at the image centre if the camera supports it; else `fallback` (--object-distance)."""
+    if not hasattr(cam, 'depth_at'):
+        return fallback
+    if frame is None:
+        frame, _ = cam.read(None, 0.0)
+    h, w = frame.shape[:2]
+    d = cam.depth_at(w / 2, h / 2, window=31)
+    if d is None:
+        print(f'  No valid RealSense depth at image centre; using --object-distance {fallback:.2f} m')
+        return fallback
+    print(f'  RealSense depth at image centre: {d:.2f} m (used for scale)')
+    return d
 
 
 def reachable_box(rtde_c, start, plane, radius, q_now, min_z=0.10, step=0.02, margin=0.02, max_joint_change_deg=90):
@@ -676,14 +635,17 @@ def describe_calibration(J, A, view):
           f'{"mirrored" if mirrored else "not mirrored"}')
 
 
-def save_calibration(path, J, A, pose0, step):
+def save_calibration(path, J, A, pose0, step, distance_m=None):
     import json
     os.makedirs(os.path.dirname(path), exist_ok=True)
     data = dict(J=J.tolist(), plane=np.asarray(A).tolist(), view=pose_rotation(pose0)[:, 2].tolist(),
                 pose=list(pose0), step=step, created=time.strftime('%Y-%m-%d %H:%M:%S'))
+    if distance_m is not None:
+        data['distance_m'] = float(distance_m)
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
-    print(f'Calibration saved to {os.path.relpath(path)}')
+    print(f'Calibration saved to {os.path.relpath(path)}'
+          + (f' (distance_m={distance_m:.2f})' if distance_m is not None else ''))
 
 
 def load_calibration(path, A, pose0, max_angle_deg=30):
@@ -693,6 +655,7 @@ def load_calibration(path, A, pose0, max_angle_deg=30):
     not change when the tool is turned (e.g. rolled 180 deg to put the image the right way up).
     Only the scale depends on the object's distance. A warning is printed if the camera now looks
     in a very different direction, since the distance to what it sees probably changed too.
+    Returns (J, distance_m); distance_m may be None for older calib files.
     """
     import json
     with open(path) as f:
@@ -704,13 +667,15 @@ def load_calibration(path, A, pose0, max_angle_deg=30):
     J = M_tool @ (R_now[:, :2].T @ np.asarray(A))
     view_now = R_now[:, 2]
     angle = math.degrees(math.acos(np.clip(np.dot(view_now, data['view']), -1, 1)))
+    distance_m = data.get('distance_m')
     print(f'Loaded calibration from {os.path.relpath(path)} ({data["created"]}); camera direction '
-          f'{angle:.1f} deg from calibration time')
+          f'{angle:.1f} deg from calibration time'
+          + (f'; distance_m={distance_m:.2f}' if distance_m is not None else ''))
     if angle > max_angle_deg:
         print(f'  Warning: the camera looks {angle:.0f} deg away from where it was calibrated: the object '
               'distance (scale) may differ. If the robot reacts too strongly or too weakly, recalibrate.')
     describe_calibration(J, A, view_now)
-    return J
+    return J, distance_m
 
 
 # ------------------------------------------------------------------ main loop
@@ -722,7 +687,8 @@ def draw_overlay(img, det, K, follower, v, status):
         p = (int(det[0]), int(det[1]))
         cv2.circle(img, p, 8, (255, 255, 255), 2)
         cv2.line(img, (cx, cy), p, (255, 255, 255), 1)
-    cv2.putText(img, f'{status}  v=({v[0]*100:+.1f}, {v[1]*100:+.1f}) cm/s', (10, 25),
+    depth = f'  d={follower.depth_now:.2f}m' if follower.depth_now is not None else ''
+    cv2.putText(img, f'{status}  v=({v[0]*100:+.1f}, {v[1]*100:+.1f}) cm/s{depth}', (10, 25),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
     return img
 
@@ -735,7 +701,7 @@ def main():
                     help='PC webcam image laid on the virtual table, seen by the tool camera (closed loop with URSim)')
     ap.add_argument('--no-robot', action='store_true', help='do not connect to the robot')
     ap.add_argument('--camera', default='0',
-                    help="index, device path, or 'realsense' (finds the RealSense colour stream)")
+                    help="index, device path, or 'realsense' (librealsense colour+depth)")
     ap.add_argument('--color', default='red', choices=list(COLOR_RANGES))
     ap.add_argument('--ip', default=ROBOT_IP)
     ap.add_argument('--gain', type=float, default=GAIN)
@@ -761,7 +727,7 @@ def main():
     ap.add_argument('--calibrate-scene', action='store_true',
                     help='calibrate from the motion of the whole scene: no object needed (hold it or not)')
     ap.add_argument('--object-distance', type=float, default=0.5,
-                    help='m, typical camera-object distance, sets the scale for --calibrate-scene')
+                    help='m, fallback camera-object distance for --calibrate-scene when depth is unavailable')
     ap.add_argument('--calib-step', type=float, default=0.05,
                     help='m, size of the calibration moves (bigger = less sensitive to a moving object)')
     ap.add_argument('--load-calib', action='store_true',
@@ -840,8 +806,20 @@ def main():
 
     if args.webcam_table:
         cam = WebcamTable(args.camera, args.color)
+    elif args.sim:
+        cam = SimCamera(args.color, mount=args.sim_mount)
     else:
-        cam = SimCamera(args.color, mount=args.sim_mount) if args.sim else Webcam(args.camera)
+        print(f'Opening camera {args.camera!r}...', flush=True)
+        try:
+            cam = open_camera(args.camera)
+        except RuntimeError as e:
+            print(f'Camera failed: {e}', flush=True)
+            if rtde_c:
+                rtde_c.stopScript()
+                rtde_c.disconnect()
+            if rtde_r:
+                rtde_r.disconnect()
+            sys.exit(1)
     window = 'Follow object (q to quit)'
     state = {'pose': start}
     if not args.headless:
@@ -857,33 +835,40 @@ def main():
         if not rtde_c:
             sys.exit('--calibrate needs the robot')
         try:
-            follower.J = calibrate(rtde_c, rtde_r, cam, args.color, start, plane, step=args.calib_step)
+            J, distance_m = calibrate(rtde_c, rtde_r, cam, args.color, start, plane, step=args.calib_step)
         except RuntimeError as e:
             print(f'Calibration failed: {e}')
             rtde_c.stopScript(); cam.close()
             sys.exit(1)
-        save_calibration(args.calib_file, follower.J, plane, start, args.calib_step)
+        follower.set_jacobian(J, distance_m)
+        save_calibration(args.calib_file, follower.J_calib, plane, start, args.calib_step,
+                         distance_m=follower.distance_m)
     elif args.calibrate_scene:
         if not rtde_c:
             sys.exit('--calibrate-scene needs the robot')
         frame0 = cam.read(state['pose'], 0.0)[0]
+        distance = measure_object_distance(cam, args.object_distance, frame=frame0)
         try:
-            follower.J = calibrate_scene(rtde_c, rtde_r, cam, start, plane, intrinsics(frame0.shape[1], frame0.shape[0]),
-                                         args.object_distance, step=args.calib_step)
+            J, distance_m = calibrate_scene(
+                rtde_c, rtde_r, cam, start, plane, intrinsics(frame0.shape[1], frame0.shape[0]),
+                distance, step=args.calib_step)
         except RuntimeError as e:
             print(f'Calibration failed: {e}')
             rtde_c.stopScript(); cam.close()
             sys.exit(1)
-        save_calibration(args.calib_file, follower.J, plane, start, args.calib_step)
+        follower.set_jacobian(J, distance_m)
+        save_calibration(args.calib_file, follower.J_calib, plane, start, args.calib_step,
+                         distance_m=follower.distance_m)
     elif args.load_calib:
         try:
-            follower.J = load_calibration(args.calib_file, plane, start)
+            J, distance_m = load_calibration(args.calib_file, plane, start)
         except (OSError, RuntimeError) as e:
             print(f'Cannot use the saved calibration: {e}')
             if rtde_c:
                 rtde_c.stopScript()
             cam.close()
             sys.exit(1)
+        follower.set_jacobian(J, distance_m)
     target = np.zeros(2)      # position in the servo plane, relative to the start pose
     last_seq, det, frame = 0, None, None
     errors, t0, last_print, tick = [], time.time(), 0.0, 0
@@ -902,6 +887,12 @@ def main():
             new = seq != last_seq
             if new:
                 det, last_seq = detect(frame, args.color), seq
+                if det is not None and hasattr(cam, 'depth_at'):
+                    d = cam.depth_at(det[0], det[1], window=11)
+                    if follower.J_calib is not None:
+                        follower.apply_depth(d)
+                    else:
+                        follower.depth_now = d
             v = follower.update(det if new else None, K, pose, now)
 
             target = clamp_plane(target + v * DT)
@@ -916,8 +907,9 @@ def main():
             if now - last_print > 1.0:
                 last_print = now
                 extra = f'  err {errors[-1][1]*1000:5.1f} mm' if errors else ''
+                depth = f'  d={follower.depth_now:.2f}m' if follower.depth_now is not None else ''
                 print(f't={now:5.1f}s {status:8s} tcp=({pose[0]:+.3f}, {pose[1]:+.3f}, {pose[2]:+.3f}) '
-                      f'v=({v[0]:+.3f}, {v[1]:+.3f}) m/s{extra}')
+                      f'v=({v[0]:+.3f}, {v[1]:+.3f}) m/s{depth}{extra}')
 
             tick += 1
             if not args.headless and tick % 2 == 0:   # display at 25 Hz

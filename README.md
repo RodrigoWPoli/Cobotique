@@ -77,7 +77,7 @@ All commands run from the repository root.
 | Check detection only, no robot | `uv run python project/follow_object.py --no-robot --color blue --camera realsense` |
 | **Real robot** | see [Real robot](#real-robot) |
 
-`--camera realsense` finds the RealSense colour stream by itself (see [Cameras](#cameras)).
+`--camera realsense` opens colour + aligned depth via librealsense (see [Cameras](#cameras)).
 
 **Keys** (in the window): `q` / `Esc` quit · `space` pause the simulated object · click to move the
 simulated object (`--sim`).
@@ -102,7 +102,7 @@ close that loop.
 | `--sim` | off | Simulated tool camera (needs URSim). |
 | `--webcam-table` | off | PC webcam on the virtual table (needs URSim). |
 | `--no-robot` | off | Don't connect to the robot. Not allowed with `--sim`, `--webcam-table` or `--calibrate`. |
-| `--camera` | `0` | Camera index, device path, or `realsense`: finds the RealSense colour stream under `/dev/v4l/by-id` on Linux, or its OpenCV index from AVFoundation on macOS. |
+| `--camera` | `0` | Camera index, device path, or `realsense` (librealsense colour + aligned depth; see [Cameras](#cameras)). |
 | `--color` | `red` | `red`, `yellow`, `green` or `blue`. |
 | `--ip` | `127.0.0.1` | Robot IP. Any IP other than `127.0.0.1`/`localhost` requires `--start-here`. |
 | `--gain` | `1.0` | Proportional gain (1/s): velocity = gain × offset. Lower it if the robot oscillates. |
@@ -116,8 +116,8 @@ close that loop.
 | `--radius` | `0.25` | With `--start-here`: how far (m) the target may go from the start position along each plane axis. At start-up the box is **reduced automatically** where the arm can't reach (no IK solution, outside the safety limits, or a joint would turn more than 90°) or where the TCP would go below `--min-z`; the allowed region is printed. |
 | `--min-z` | `0.10` | With `--start-here`: lowest TCP height (m, robot base frame), to stay clear of the table the robot stands on. Raise it if the tool is long or there are objects on the table. |
 | `--calibrate` | off | Before following, move ±`--calib-step` along both plane axes and measure how a still object moves in the image (image Jacobian), then save it to `--calib-file`. The camera's mounting and the object's distance don't need to be known. Each position is the median of 20 frames; if the object drifts or the + and − shifts don't mirror each other, the object moved and calibration is refused. |
-| `--calibrate-scene` | off | Calibrate from the motion of the **whole scene** (ORB feature matches between frames): no object needed, so you can hold it in your hand, or not show it at all. Gives the image directions (rotation, mirroring) exactly; the scale comes from the focal length and `--object-distance`. Needs a textured scene (not a blank wall) and nothing large moving in view. Saves like `--calibrate`. |
-| `--object-distance` | `0.5` | Typical camera–object distance (m), used for the scale with `--calibrate-scene`. A wrong value only makes the robot react more or less strongly (lower `--gain` if it overshoots); the direction stays right. |
+| `--calibrate-scene` | off | Calibrate from the motion of the **whole scene** (ORB feature matches between frames): no object needed, so you can hold it in your hand, or not show it at all. Gives the image directions (rotation, mirroring) exactly; the scale comes from the focal length and RealSense depth (or `--object-distance` as fallback). Needs a textured scene (not a blank wall) and nothing large moving in view. Saves like `--calibrate`. |
+| `--object-distance` | `0.5` | Fallback camera–object distance (m) for `--calibrate-scene` when RealSense depth is unavailable. With `--camera realsense`, depth at the image centre is used instead when valid. |
 | `--calib-step` | `0.05` | Size (m) of the calibration moves. Bigger = less sensitive to a slightly moving object. Keep it below `--radius`. |
 | `--load-calib` | off | Use the calibration saved by the last `--calibrate` / `--calibrate-scene`: no calibration moves. It's stored relative to the **tool** (the camera is fixed to it), so it stays valid when the tool is turned or rolled. A warning is printed if the camera looks more than 30° away from where it was calibrated, since the object distance (scale) may then differ. |
 | `--calib-file` | `data/follow_calibration.json` | Where `--calibrate` saves and `--load-calib` reads (`data/` is git-ignored). |
@@ -161,15 +161,21 @@ Constants at the top of `follow_object.py`:
 
 | Device | Camera |
 |---|---|
-| `/dev/video0` | Laptop webcam (1080p FHD) |
-| `/dev/video6` | RealSense D435i, **colour**. Use `--camera realsense`: the video number can change when replugged, and the by-id name only includes the serial number when the camera reports it. |
-| `/dev/video4` | RealSense D435i, infrared (grey) |
+| `/dev/video0` | Laptop webcam (1080p FHD); `--camera 0` (OpenCV) |
+| `--camera realsense` | RealSense D435i via **librealsense** (`project/camera.py`): colour + depth aligned to colour |
+| OpenCV index / path | Plain webcam path; on Linux the old V4L colour node still works if you pass it explicitly |
 
-**macOS:** `--camera realsense` lists the cameras the same way OpenCV does (AVFoundation devices
-sorted by unique ID) and picks the RealSense's RGB device; it prints the index it chose. It needs
-`pyobjc-framework-AVFoundation`, which `uv sync` installs on macOS only. The first time, allow camera
-access for the terminal in System Settings → Privacy & Security → Camera. `ur-rtde` has no macOS wheels,
-so `uv sync` compiles it there (`brew install cmake boost` first).
+`--camera realsense` does **not** use OpenCV’s AVFoundation/V4L index (on macOS that often only
+exposes the Depth device). It uses `pyrealsense2` (Linux/Windows) or `pyrealsense2-macosx` (macOS),
+installed by `uv sync`. Depth (m) fills the scale for `--calibrate-scene` when valid, is stored in
+`data/follow_calibration.json` as `distance_m`, and rescales the image Jacobian while following so
+mm/px stays right as the object moves closer or farther. `--object-distance` is only the fallback
+when depth is missing.
+
+**macOS:** allow Camera for the terminal in System Settings → Privacy & Security → Camera. Prefer a
+USB 3 port (no hub). If librealsense finds no device (`failed to set power state`), some macOS
+versions need the script run with `sudo`. `ur-rtde` has no macOS wheels, so `uv sync` compiles it
+(`brew install cmake boost` first).
 
 **Colour choice with the RealSense:** the teach pendant's blue-green body triggers both `blue` and
 `green`, and the cream table can trigger `yellow` and `green`. Use **red or blue** objects, keep the
@@ -197,8 +203,8 @@ The RealSense is mounted on the tool, so the default mode closes the loop for re
    the result. **Rest the object on something** during calibration rather than holding it: a hand
    wobbles by 1–2 cm, which is the size of what calibration measures.
    **Nowhere to rest it?** Use `--calibrate-scene` instead: it measures how the whole scene moves,
-   so the object can be in your hand (or out of view). Set `--object-distance` to roughly how far
-   you'll hold the object.
+   so the object can be in your hand (or out of view). With `--camera realsense`, depth sets the
+   scale; otherwise set `--object-distance` to roughly how far you'll hold the object.
    Next time, with the camera looking the same way, skip the moves with `--load-calib` instead of
    `--calibrate`.
 4. When it follows smoothly, raise the speed and gain step by step, up to `--max-speed 0.08` (the hard cap) and `--gain 3`.
