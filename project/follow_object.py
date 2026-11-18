@@ -386,6 +386,59 @@ def robot_fault(rtde_r):
 
 
 CALIB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'follow_calibration.json')
+HOME_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'follow_home.json')
+HOME_MAX_JOINT_MOVE_DEG = 45            # --home refuses a bigger joint move (no big sweeps)
+
+
+def square_orientation(rotvec):
+    """Snap a TCP orientation to the base axes: tool Z and X go to the nearest +-X/Y/Z, Y = Z x X."""
+    R = cv2.Rodrigues(np.asarray(rotvec, float))[0]
+
+    def snap(v, exclude=None):
+        k = max((i for i in range(3) if i != exclude), key=lambda i: abs(v[i]))
+        e = np.zeros(3); e[k] = np.sign(v[k])
+        return e, k
+
+    z, kz = snap(R[:, 2])
+    x, _ = snap(R[:, 0], exclude=kz)
+    Rs = np.column_stack([x, np.cross(z, x), z])
+    return cv2.Rodrigues(Rs)[0].ravel(), math.degrees(math.acos(np.clip((np.trace(Rs.T @ R) - 1) / 2, -1, 1)))
+
+
+def set_home(rtde_c, rtde_r, path):
+    """Save the current TCP position with a squared-up orientation as the start pose. No motion."""
+    import json
+    pose, q_now = list(rtde_r.getActualTCPPose()), rtde_r.getActualQ()
+    rv, angle = square_orientation(pose[3:])
+    home = [*pose[:3], *rv]
+    if not rtde_c.isPoseWithinSafetyLimits(home) or not rtde_c.getInverseKinematicsHasSolution(home, q_now):
+        raise RuntimeError('the squared-up pose is not reachable from here')
+    q = rtde_c.getInverseKinematics(home, q_now)
+    move = np.degrees(np.abs(np.asarray(q) - q_now))
+    R = pose_rotation(home)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as f:
+        json.dump(dict(pose=home, q=list(q), created=time.strftime('%Y-%m-%d %H:%M:%S')), f, indent=2)
+    axis = lambda v: ('+' if v[np.argmax(np.abs(v))] > 0 else '-') + 'XYZ'[int(np.argmax(np.abs(v)))]
+    print(f'Home saved to {os.path.relpath(path)}: position {np.round(home[:3], 4).tolist()} m, '
+          f'camera along {axis(R[:, 2])}, image x along {axis(R[:, 0])}, image y along {axis(R[:, 1])}')
+    print(f'  orientation squared by {angle:.1f} deg; joints {np.round(np.degrees(q), 2).tolist()} '
+          f'(largest change from now {move.max():.1f} deg). Use --home to start from it.')
+
+
+def go_home(rtde_c, rtde_r, path):
+    """Slow joint move to the saved home pose; refuses big moves."""
+    import json
+    with open(path) as f:
+        home = json.load(f)
+    q_now = np.asarray(rtde_r.getActualQ())
+    move = np.degrees(np.abs(np.asarray(home['q']) - q_now))
+    if move.max() > HOME_MAX_JOINT_MOVE_DEG:
+        raise RuntimeError(f'home is {move.max():.0f} deg away on joint {int(np.argmax(move)) + 1} '
+                           f'(limit {HOME_MAX_JOINT_MOVE_DEG}): jog the robot closer to it first')
+    print(f'Moving (moveJ, slow) to home {np.round(home["pose"][:3], 3).tolist()} m '
+          f'(largest joint change {move.max():.1f} deg)...')
+    rtde_c.moveJ(home['q'], 0.25, 0.25)
 
 
 def calibrate(rtde_c, rtde_r, cam, color, pose0, A=BASE_XY, step=0.05):
@@ -539,6 +592,51 @@ def calibrate_scene(rtde_c, rtde_r, cam, pose0, A, K, distance, step=0.05):
     return J
 
 
+def reachable_box(rtde_c, start, plane, radius, q_now, min_z=0.10, step=0.02, margin=0.02, max_joint_change_deg=90):
+    """Shrink the +-radius box (plane coordinates) to what the arm can reach from the start pose.
+
+    Walks outward from the start along each plane direction in `step` increments and stops at the
+    first pose that is below min_z (base frame: the table), outside the safety limits, has no IK
+    solution, or needs a joint to turn more
+    than max_joint_change_deg from now (a flip / near a singularity). Then checks the four corners
+    and pulls in any that fail. Uses getInverseKinematicsHasSolution first: asking
+    getInverseKinematics for an unreachable pose stops the robot's control script.
+    Returns (lo, hi): per-axis limits in plane coordinates.
+    """
+    origin, q_now = np.asarray(start[:3], float), np.asarray(q_now, float)
+
+    def ok(c):
+        pose = [*(origin + plane @ np.asarray(c, float)), *start[3:]]
+        if pose[2] < min_z:
+            return False
+        if not rtde_c.isPoseWithinSafetyLimits(pose):
+            return False
+        if not rtde_c.getInverseKinematicsHasSolution(pose, list(q_now)):
+            return False
+        q = rtde_c.getInverseKinematics(pose, list(q_now))
+        return bool(q) and np.max(np.abs(np.asarray(q) - q_now)) < math.radians(max_joint_change_deg)
+
+    lo, hi = np.full(2, -radius), np.full(2, radius)
+    for axis in (0, 1):
+        for sign, lim in ((+1, hi), (-1, lo)):
+            reach = 0.0
+            for t in [*np.arange(step, radius - 1e-9, step), radius]:
+                c = np.zeros(2); c[axis] = sign * t
+                if not ok(c):
+                    break
+                reach = t
+            lim[axis] = sign * (max(reach - margin, 0.0) if reach < radius else radius)
+    for _ in range(10):                           # corners: shrink the failing quadrant
+        bad = [(i, j) for i in (0, 1) for j in (0, 1)
+               if not ok([(lo, hi)[i][0], (lo, hi)[j][1]])]
+        if not bad:
+            break
+        for i, j in bad:
+            (lo, hi)[i][0] *= 0.85
+            (lo, hi)[j][1] *= 0.85
+    return lo, hi
+
+
 def describe_calibration(J, A, view):
     """Print J as scale + rotation + mirror, to compare with the mounting you expect."""
     cols = np.linalg.norm(J, axis=0)
@@ -561,19 +659,29 @@ def save_calibration(path, J, A, pose0, step):
     print(f'Calibration saved to {os.path.relpath(path)}')
 
 
-def load_calibration(path, A, pose0, max_angle_deg=10):
-    """Saved J, expressed in the current servo plane. Refuses if the camera now looks elsewhere."""
+def load_calibration(path, A, pose0, max_angle_deg=30):
+    """Saved J, expressed in the current servo plane.
+
+    The camera is fixed to the tool, so the calibration is re-expressed in TOOL axes: that part does
+    not change when the tool is turned (e.g. rolled 180 deg to put the image the right way up).
+    Only the scale depends on the object's distance. A warning is printed if the camera now looks
+    in a very different direction, since the distance to what it sees probably changed too.
+    """
     import json
     with open(path) as f:
         data = json.load(f)
-    view_now = pose_rotation(pose0)[:, 2]
+    R_cal = pose_rotation(data['pose'])
+    # pixel shift per metre of motion along tool X / tool Y at calibration time
+    M_tool = np.asarray(data['J']) @ (np.asarray(data['plane']).T @ R_cal[:, :2])
+    R_now = pose_rotation(pose0)
+    J = M_tool @ (R_now[:, :2].T @ np.asarray(A))
+    view_now = R_now[:, 2]
     angle = math.degrees(math.acos(np.clip(np.dot(view_now, data['view']), -1, 1)))
+    print(f'Loaded calibration from {os.path.relpath(path)} ({data["created"]}); camera direction '
+          f'{angle:.1f} deg from calibration time')
     if angle > max_angle_deg:
-        raise RuntimeError(f'the camera looks {angle:.0f} deg away from where it was calibrated '
-                           f'({data["created"]}): run --calibrate again')
-    # plane coordinates now -> base displacement -> plane coordinates at calibration time
-    J = np.asarray(data['J']) @ (np.asarray(data['plane']).T @ np.asarray(A))
-    print(f'Loaded calibration from {os.path.relpath(path)} ({data["created"]}, view {angle:.1f} deg off)')
+        print(f'  Warning: the camera looks {angle:.0f} deg away from where it was calibrated: the object '
+              'distance (scale) may differ. If the robot reacts too strongly or too weakly, recalibrate.')
     describe_calibration(J, A, view_now)
     return J
 
@@ -609,8 +717,18 @@ def main():
     ap.add_argument('--height', type=float, default=FOLLOW_Z)
     ap.add_argument('--start-here', action='store_true',
                     help='real robot: follow from the CURRENT pose (height + orientation), no move to a preset pose')
-    ap.add_argument('--radius', type=float, default=0.15,
-                    help='with --start-here: half-size (m) of the XY box around the start pose')
+    ap.add_argument('--set-home', action='store_true',
+                    help='save the current position, with the orientation squared to the base axes, as the '
+                         'home pose (no motion), then exit')
+    ap.add_argument('--home', action='store_true',
+                    help='move slowly to the saved home pose, then follow from there (implies --start-here)')
+    ap.add_argument('--home-file', default=HOME_FILE, help='where --set-home saves / --home reads')
+    ap.add_argument('--radius', type=float, default=0.25,
+                    help='with --start-here: how far (m) the target may go from the start along each '
+                         'plane axis; reduced automatically where the arm cannot reach')
+    ap.add_argument('--min-z', type=float, default=0.10,
+                    help='with --start-here: lowest TCP height (m, robot base frame) the target may reach, '
+                         'to stay clear of the table the robot stands on')
     ap.add_argument('--calibrate', action='store_true',
                     help='measure the camera->robot mapping first (object must be visible and still)')
     ap.add_argument('--calibrate-scene', action='store_true',
@@ -631,8 +749,10 @@ def main():
     if (args.sim or args.webcam_table) and args.no_robot:
         sys.exit('--sim / --webcam-table need the robot pose; drop --no-robot')
 
+    if args.home:
+        args.start_here = True             # follow from home exactly like from the current pose
     local = args.ip in ('127.0.0.1', 'localhost')
-    if not local and not args.no_robot and not args.start_here:
+    if not local and not args.no_robot and not (args.start_here or args.set_home):
         sys.exit('Real robot: use --start-here (jog the camera above the table first). '
                  'The preset start pose and workspace are for URSim only.')
 
@@ -640,6 +760,15 @@ def main():
     start = [*START_XY, FOLLOW_Z, *TOOL_DOWN]
     if not args.no_robot:
         rtde_c, rtde_r = connect(args.ip)
+        if args.set_home or args.home:
+            try:
+                (set_home if args.set_home else go_home)(rtde_c, rtde_r, args.home_file)
+            except (OSError, RuntimeError) as e:
+                print(f'{"--set-home" if args.set_home else "--home"} failed: {e}')
+                rtde_c.stopScript(); sys.exit(1)
+            if args.set_home:
+                rtde_c.stopScript(); rtde_c.disconnect(); rtde_r.disconnect()
+                return
         if args.start_here:
             start = list(rtde_r.getActualTCPPose())
             R0 = pose_rotation(start)
@@ -664,10 +793,21 @@ def main():
         plane = BASE_XY
     origin = np.asarray(start[:3], float)
 
+    box_lo, box_hi = np.full(2, -args.radius), np.full(2, args.radius)
+    if args.start_here and rtde_c:
+        if start[2] < args.min_z:
+            rtde_c.stopScript()
+            sys.exit(f'The TCP is at z={start[2]:.3f} m, below --min-z {args.min_z} m: jog it higher first.')
+        box_lo, box_hi = reachable_box(rtde_c, start, plane, args.radius, rtde_r.getActualQ(), min_z=args.min_z)
+        print(f'Allowed region around the start (m): axis 1 [{box_lo[0]:+.2f}, {box_hi[0]:+.2f}], '
+              f'axis 2 [{box_lo[1]:+.2f}, {box_hi[1]:+.2f}]'
+              + ('' if np.allclose(box_hi - box_lo, 2 * args.radius) else
+                 f'  (reduced from +-{args.radius:.2f}: out of reach, or below --min-z {args.min_z} m)'))
+
     def clamp_plane(c):
-        """Keep the target inside the allowed box: +-radius in the plane, or WORKSPACE (base XY)."""
+        """Keep the target inside the allowed box (--start-here), or WORKSPACE (base XY)."""
         if args.start_here:
-            return np.clip(c, -args.radius, args.radius)
+            return np.clip(c, box_lo, box_hi)
         x, y = clamp_xy(*(origin[:2] + c))
         return np.array([x, y]) - origin[:2]
 

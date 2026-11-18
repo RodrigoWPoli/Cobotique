@@ -3,7 +3,8 @@
 ### TLDR:
 
 ```bash
-uv run python project/follow_object.py --ip 100.65.63.93 --start-here --load-calib       --object-distance 0.5 --max-speed 0.01 --gain 1.5 --radius 0.10 --color blue --camera realsense
+uv run python project/follow_object.py --ip 100.65.63.93 --home --load-calib \
+    --max-speed 0.01 --gain 1.5 --color blue --camera realsense
 ```
 
 **The UR5e follows a coloured object seen by a camera mounted on its tool** (eye-in-hand, image-based
@@ -91,12 +92,16 @@ close that loop.
 | `--max-speed` | `0.02` | TCP speed cap in m/s (2 cm/s), also used for the calibration moves. Hard-limited to 0.08 for safety. Use `0.01` for 1 cm/s. |
 | `--height` | `0.30` | TCP height (m) while following. Ignored with `--start-here`, which keeps the current height. |
 | `--start-here` | off | Follow from the **current** pose and orientation, moving in the plane of the start pose's tool X/Y (at right angles to the camera). Never moves to a preset pose. Required on the real robot. If the camera doesn't look down, `--calibrate` is required too. |
-| `--radius` | `0.15` | With `--start-here`: the target stays within ±radius (m) of the start position along each plane axis. |
+| `--set-home` | off | Save the current TCP position as the home pose, with the orientation **squared to the base axes** (tool Z and X snapped to the nearest ±X/Y/Z), then exit. Checks the pose is reachable; **does not move** the robot. |
+| `--home` | off | Move slowly (`moveJ`, 0.25 rad/s) to the saved home pose, then follow from there (implies `--start-here`). Refuses if any joint would turn more than 45°: jog closer first. |
+| `--home-file` | `data/follow_home.json` | Where `--set-home` saves and `--home` reads (git-ignored). |
+| `--radius` | `0.25` | With `--start-here`: how far (m) the target may go from the start position along each plane axis. At start-up the box is **reduced automatically** where the arm can't reach (no IK solution, outside the safety limits, or a joint would turn more than 90°) or where the TCP would go below `--min-z`; the allowed region is printed. |
+| `--min-z` | `0.10` | With `--start-here`: lowest TCP height (m, robot base frame), to stay clear of the table the robot stands on. Raise it if the tool is long or there are objects on the table. |
 | `--calibrate` | off | Before following, move ±`--calib-step` along both plane axes and measure how a still object moves in the image (image Jacobian), then save it to `--calib-file`. The camera's mounting and the object's distance don't need to be known. Each position is the median of 20 frames; if the object drifts or the + and − shifts don't mirror each other, the object moved and calibration is refused. |
 | `--calibrate-scene` | off | Calibrate from the motion of the **whole scene** (ORB feature matches between frames): no object needed, so you can hold it in your hand, or not show it at all. Gives the image directions (rotation, mirroring) exactly; the scale comes from the focal length and `--object-distance`. Needs a textured scene (not a blank wall) and nothing large moving in view. Saves like `--calibrate`. |
 | `--object-distance` | `0.5` | Typical camera–object distance (m), used for the scale with `--calibrate-scene`. A wrong value only makes the robot react more or less strongly (lower `--gain` if it overshoots); the direction stays right. |
 | `--calib-step` | `0.05` | Size (m) of the calibration moves. Bigger = less sensitive to a slightly moving object. Keep it below `--radius`. |
-| `--load-calib` | off | Use the calibration saved by the last `--calibrate`: no calibration moves. Refused if the camera now looks more than 10° away from where it was calibrated. |
+| `--load-calib` | off | Use the calibration saved by the last `--calibrate` / `--calibrate-scene`: no calibration moves. It's stored relative to the **tool** (the camera is fixed to it), so it stays valid when the tool is turned or rolled. A warning is printed if the camera looks more than 30° away from where it was calibrated, since the object distance (scale) may then differ. |
 | `--calib-file` | `data/follow_calibration.json` | Where `--calibrate` saves and `--load-calib` reads (`data/` is git-ignored). |
 | `--sim-mount YAW FLIP` | — | `--sim` only: actual camera mounting (yaw in degrees, mirror 0/1) to test `--calibrate`, e.g. `--sim-mount 90 1`. |
 | `--headless` | off | No window (tests). |
@@ -113,7 +118,7 @@ Constants at the top of `follow_object.py`:
 |---|---|---|
 | `ROBOT_IP` | `'127.0.0.1'` | Default for `--ip`. |
 | `TOOL_DOWN` | `[0, π, 0]` | Tool orientation (rotation vector) in URSim mode: tool Z pointing down. |
-| `WORKSPACE` | x `[-0.75, -0.20]`, y `[-0.45, 0.45]` m | Box the target is clamped to (URSim mode). With `--start-here` it becomes start ± `--radius`. |
+| `WORKSPACE` | x `[-0.75, -0.20]`, y `[-0.45, 0.45]` m | Box the target is clamped to (URSim mode). With `--start-here` it becomes start ± `--radius`, reduced to what the arm can reach. |
 | `FOLLOW_Z` | `0.30` m | Default for `--height`. |
 | `START_XY` | `(-0.45, 0.0)` m | Start position in URSim mode. |
 | `HOME_SEED_DEG` | `[-162.8, -88.1, -120.5, -61.4, 90.0, -72.8]` | Joint seed for the start pose's IK: elbow-up, every joint far from its limits. |
@@ -161,7 +166,7 @@ The RealSense is mounted on the tool, so the default mode closes the loop for re
    and in a small box:
    ```bash
    uv run python project/follow_object.py --ip <ROBOT_IP> --start-here --calibrate \
-       --max-speed 0.02 --gain 1.5 --radius 0.10 --color red --camera realsense
+       --max-speed 0.02 --gain 1.5 --color red --camera realsense
    ```
    `--calibrate` makes four slow 5 cm moves (at `--max-speed`, 2 cm/s by default), prints the measured mapping (mm per pixel, image axis
    direction, mirrored or not), refuses to start if the object left the view or moved, and saves
@@ -178,16 +183,28 @@ The RealSense is mounted on the tool, so the default mode closes the loop for re
 On an e-series robot, **Remote Control** must be on in Polyscope. If EtherNet/IP, PROFINET or MODBUS
 is enabled on the robot, the connection fails with "input registers already in use".
 
+### Home pose
+
+Jog the robot roughly where you want it, then save that spot with a clean orientation:
+
+```bash
+uv run python project/follow_object.py --ip 100.65.63.93 --set-home     # no motion
+```
+
+From then on `--home` moves there slowly at start-up and follows from it. The lab robot's home
+is TCP (0.148, −0.749, 0.540) m, camera along −Y, image x along −X, image y along −Z (the camera
+image is the right way up; the first home, with image x along +X, showed it upside down).
+
 ### Camera looking forward
 
 With the tool horizontal, the robot follows an object held in front of the camera, moving sideways
-and up/down within ±`--radius`. Hold the object 30–80 cm from the camera; `--calibrate-scene`
+and up/down within ±`--radius` (25 cm by default, less where the arm can't reach). Hold the object 30–80 cm from the camera; `--calibrate-scene`
 calibrates from the room, so it doesn't matter if your hand moves. Make sure nothing else of that colour is in view (in the lab, the **red door** behind the robot
 triggers `red`: use `blue`, or check first with `--no-robot`):
 
 ```bash
 uv run python project/follow_object.py --ip 100.65.63.93 --start-here --calibrate-scene \
-    --object-distance 0.5 --max-speed 0.02 --gain 1.5 --radius 0.10 --color blue --camera realsense
+    --object-distance 0.5 --max-speed 0.02 --gain 1.5 --color blue --camera realsense
 ```
 
 ### Network
