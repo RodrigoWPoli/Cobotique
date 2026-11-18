@@ -2,10 +2,29 @@
 
 ### TLDR:
 
+Before each session: `sudo tailscale down` (see [Network](#network)), hand within reach of the e-stop.
+
+**Once per machine** (`data/`, where the home pose and calibration are saved, is not in git):
+
+```bash
+# 1. With the pendant, jog the robot to the start position, camera looking forward, image the right way up.
+uv run python project/follow_object.py --ip 100.65.63.93 --set-home      # saves it, no motion
+
+# 2. Calibrate from home and start following (moves the robot: 4 slow 5 cm moves, then follows).
+#    Hold the blue object ~50 cm in front of the camera; it may move during calibration.
+uv run python project/follow_object.py --ip 100.65.63.93 --home --calibrate-scene \
+    --max-speed 0.01 --gain 1.5 --color blue --camera realsense
+```
+
+**Every time after that:**
+
 ```bash
 uv run python project/follow_object.py --ip 100.65.63.93 --home --load-calib \
     --max-speed 0.01 --gain 1.5 --color blue --camera realsense
 ```
+
+If `--home` refuses ("jog the robot closer to it first"), jog the robot near the start position and run it
+again. Press `q` in the window to stop.
 
 **The UR5e follows a coloured object seen by a camera mounted on its tool** (eye-in-hand, image-based
 visual servoing). Each frame, `project/follow_object.py`:
