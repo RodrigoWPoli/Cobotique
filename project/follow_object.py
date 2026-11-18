@@ -254,7 +254,7 @@ class DepthFollower:
         if now - self.last_ok > LOST_TIMEOUT:
             self.d = None
         e = 0.0 if self.d is None else self.d - self.target
-        v_des = self.gain * e if abs(e) > self.deadband else 0.0
+        v_des = float(np.clip(self.gain * e, -MAX_SPEED, MAX_SPEED)) if abs(e) > self.deadband else 0.0
         dv = float(np.clip(v_des - self.v, -MAX_ACCEL * DT, MAX_ACCEL * DT))
         self.v += dv
         return self.v
@@ -984,12 +984,24 @@ def main():
                         follower.depth_now = d
             v = follower.update(det if new else None, K, pose, now)
             if depth_follower:
-                v = np.append(v, depth_follower.update(d if new else None, now))
-                speed = np.linalg.norm(v)
-                if speed > MAX_SPEED:            # one cap on the combined 3D speed
-                    v = v * (MAX_SPEED / speed)
+                # Centring the object in the image gets the speed budget first (losing it from view
+                # loses everything); the camera axis only gets what is left of --max-speed.
+                vz = depth_follower.update(d if new else None, now)
+                budget = math.sqrt(max(MAX_SPEED ** 2 - float(np.dot(v, v)), 0.0))
+                v = np.append(v, np.clip(vz, -budget, budget))
 
-            target = clamp_plane(target + v * dt)   # measured dt: the speed cap holds even if the loop is late
+            proposed = target + v * dt           # measured dt: the speed cap holds even if the loop is late
+            target = clamp_plane(proposed)
+            # Anti-windup: an axis pressed against its box edge stops pushing, and its controller
+            # forgets the velocity it had built up (it would otherwise keep the speed budget).
+            pinned = np.abs(target - proposed[:len(target)]) > 1e-9
+            if pinned.any():
+                v = v.copy(); v[:len(target)][pinned] = 0.0
+                for k in np.flatnonzero(pinned):
+                    if k < 2:
+                        follower.v[k] = 0.0
+                    elif depth_follower:
+                        depth_follower.v = 0.0
             if rtde_c:   # orientation stays the start orientation
                 rtde_c.servoL([*(origin + motion @ target), *start[3:]], 0.0, 0.0, DT, 0.1, 300)
 
