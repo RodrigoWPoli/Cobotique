@@ -205,6 +205,8 @@ def resolve_camera(name):
     if name.isdigit():
         return int(name)
     if name.lower() == 'realsense':
+        if sys.platform == 'darwin':
+            return realsense_index_macos()
         # by-id names include the serial number only when the camera reports it, so match loosely;
         # video-index0 is the colour stream (index2 is infrared)
         import glob
@@ -213,6 +215,31 @@ def resolve_camera(name):
             raise RuntimeError('No RealSense found under /dev/v4l/by-id (check the USB cable)')
         return paths[0]
     return name
+
+
+def realsense_index_macos():
+    """OpenCV camera index of the RealSense on macOS.
+
+    OpenCV's AVFoundation backend lists AVFoundation video + muxed devices sorted by uniqueID, and
+    --camera N is the position in that list (opencv/modules/videoio/src/cap_avfoundation_mac.mm).
+    This builds the same list and finds the device named RealSense, preferring its RGB stream.
+    """
+    try:
+        import AVFoundation
+    except ImportError:
+        raise RuntimeError('--camera realsense on macOS needs pyobjc-framework-AVFoundation '
+                           '(installed by `uv sync`), or pass the camera number, e.g. --camera 1') from None
+    devices = (list(AVFoundation.AVCaptureDevice.devicesWithMediaType_(AVFoundation.AVMediaTypeVideo))
+               + list(AVFoundation.AVCaptureDevice.devicesWithMediaType_(AVFoundation.AVMediaTypeMuxed)))
+    devices.sort(key=lambda d: str(d.uniqueID()))
+    names = [str(d.localizedName()) for d in devices]
+    found = [i for i, n in enumerate(names) if 'realsense' in n.lower()]
+    if not found:
+        raise RuntimeError(f'No RealSense among the cameras: {names} (check the USB cable)')
+    rgb = [i for i in found if 'rgb' in names[i].lower() or 'color' in names[i].lower()]
+    index = (rgb or found)[0]
+    print(f'RealSense: camera {index} ({names[index]})')
+    return index
 
 
 class Webcam:

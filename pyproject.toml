@@ -9,6 +9,7 @@ dependencies = [
     "numpy>=2.5.5",
     "opencv-python<5",
     "polars>=2.1.0",
+    "pyobjc-framework-avfoundation>=13.0 ; sys_platform == 'darwin'",
     "ur-rtde>=1.6.5",
 ]
 

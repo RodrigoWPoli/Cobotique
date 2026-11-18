@@ -84,7 +84,7 @@ close that loop.
 | `--sim` | off | Simulated tool camera (needs URSim). |
 | `--webcam-table` | off | PC webcam on the virtual table (needs URSim). |
 | `--no-robot` | off | Don't connect to the robot. Not allowed with `--sim`, `--webcam-table` or `--calibrate`. |
-| `--camera` | `0` | Camera index, device path, or `realsense` (finds the RealSense colour stream under `/dev/v4l/by-id`). |
+| `--camera` | `0` | Camera index, device path, or `realsense`: finds the RealSense colour stream under `/dev/v4l/by-id` on Linux, or its OpenCV index from AVFoundation on macOS. |
 | `--color` | `red` | `red`, `yellow`, `green` or `blue`. |
 | `--ip` | `127.0.0.1` | Robot IP. Any IP other than `127.0.0.1`/`localhost` requires `--start-here`. |
 | `--gain` | `1.0` | Proportional gain (1/s): velocity = gain × offset. Lower it if the robot oscillates. |
@@ -146,6 +146,12 @@ Constants at the top of `follow_object.py`:
 | `/dev/video0` | Laptop webcam (1080p FHD) |
 | `/dev/video6` | RealSense D435i, **colour**. Use `--camera realsense`: the video number can change when replugged, and the by-id name only includes the serial number when the camera reports it. |
 | `/dev/video4` | RealSense D435i, infrared (grey) |
+
+**macOS:** `--camera realsense` lists the cameras the same way OpenCV does (AVFoundation devices
+sorted by unique ID) and picks the RealSense's RGB device; it prints the index it chose. It needs
+`pyobjc-framework-AVFoundation`, which `uv sync` installs on macOS only. The first time, allow camera
+access for the terminal in System Settings → Privacy & Security → Camera. `ur-rtde` has no macOS wheels,
+so `uv sync` compiles it there (`brew install cmake boost` first).
 
 **Colour choice with the RealSense:** the teach pendant's blue-green body triggers both `blue` and
 `green`, and the cream table can trigger `yellow` and `green`. Use **red or blue** objects, keep the
