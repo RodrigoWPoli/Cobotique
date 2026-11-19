@@ -66,6 +66,16 @@ If URSim refuses connections after a protective stop:
 printf 'unlock protective stop\nquit\n' | nc 127.0.0.1 29999
 ```
 
+## GUI launcher (Qt6)
+
+Optional single-window Qt6 app that picks a scenario (detection / lab robot / URSim),
+builds the CLI, shows logs, and can stop the process: see [`gui/README.md`](gui/README.md).
+
+```bash
+cmake -S gui -B gui/build -DCMAKE_PREFIX_PATH="$(brew --prefix qt6)"   # macOS
+cmake --build gui/build && ./gui/build/follow_launcher
+```
+
 ## Commands
 
 All commands run from the repository root.
@@ -309,6 +319,7 @@ The simulated camera has no latency; expect a lower usable gain on the real robo
 | `project/follow_object.py` | **Object following** (this page) |
 | `project/detection.py` | HSV colour blobs + optional silhouette match (`--shape`) |
 | `project/camera.py` | Webcam / RealSense (colour + aligned depth) |
+| `gui/` | Qt6 launcher (`follow_launcher`) for scenarios + logs |
 | `workshop/` | Workshop decks and notebooks, kept locally and git-ignored |
 
 ### Usage

@@ -26,3 +26,6 @@ ursim/programs/*.old
 
 # Workshop material (decks, Day notebooks, tools): kept locally, not part of the project
 workshop/
+
+# Qt follow_launcher build tree
+gui/build/
