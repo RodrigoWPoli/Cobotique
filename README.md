@@ -72,7 +72,8 @@ Optional single-window Qt6 app that picks a scenario (detection / lab robot / UR
 builds the CLI, shows logs, and can stop the process: see [`gui/README.md`](gui/README.md).
 
 ```bash
-cmake -S gui -B gui/build -DCMAKE_PREFIX_PATH="$(brew --prefix qt6)"   # macOS
+# Linux (paquet qt6-base-dev / équivalent) — macOS: ajoute -DCMAKE_PREFIX_PATH="$(brew --prefix qt6)"
+cmake -S gui -B gui/build
 cmake --build gui/build && ./gui/build/follow_launcher
 ```
 
