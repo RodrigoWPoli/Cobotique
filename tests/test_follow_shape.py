@@ -1,5 +1,4 @@
 """Shape matching on top of the colour blob detector in project/detection.py."""
-import glob
 import os
 import sys
 
@@ -50,11 +49,26 @@ def test_shape_rejects_circle_and_keeps_a_rotated_copy(tmp_path):
     np.testing.assert_allclose(found[:2], (180, 180), atol=6)
 
 
+def test_capture_shape_learns_the_frame_and_saves_it(tmp_path):
+    frame = np.full((240, 320, 3), 255, np.uint8)
+    cv2.rectangle(frame, (60, 50), (180, 170), BLUE, -1)
+    model, path = det.capture_shape(frame, 'blue', folder=str(tmp_path))
+    assert os.path.dirname(path) == str(tmp_path) and os.path.basename(path).startswith('shape_')
+    assert det.resolve_shape_photo(path) == path
+    reloaded = det.learn_shape(path, 'blue')          # the saved photo gives the same silhouette
+    assert abs(reloaded.aspect - model.aspect) < 1e-6
+
+    empty = np.full((240, 320, 3), 255, np.uint8)
+    with pytest.raises(RuntimeError):
+        det.capture_shape(empty, 'blue', folder=str(tmp_path / 'none'))
+    assert not (tmp_path / 'none').exists()           # nothing saved when nothing was learned
+
+
 def test_reference_photo_is_the_square_bin_not_a_circle():
-    photos = glob.glob('data/*.jpg') + glob.glob('data/*.jpeg') + glob.glob('data/*.png')
-    if not photos:
-        pytest.skip('no reference photo in data/')
-    path = max(photos, key=os.path.getmtime)
+    # The lab's bin photo. Not "the newest photo in data/": the s key saves new captures there.
+    path = 'data/shape_ref.jpg'
+    if not os.path.exists(path):
+        pytest.skip('no reference photo data/shape_ref.jpg')
     model = det.learn_shape(path, 'blue')
     assert 1.0 <= model.aspect <= 1.3
     assert model.solidity > 0.95

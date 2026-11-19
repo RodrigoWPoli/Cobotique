@@ -92,7 +92,13 @@ All commands run from the repository root.
 `--camera realsense` opens colour + aligned depth via librealsense (see [Cameras](#cameras)).
 
 **Keys** (in the window): `q` / `Esc` quit · `space` pause the simulated object · click to move the
-simulated object (`--sim`).
+simulated object (`--sim`) · `s` learn the shape from the current frame · `x` forget the shape.
+
+**Taking the shape photo while running:** point the camera at the object (it should be the largest blob of
+`--color` in view, i.e. the one outlined when following by colour only) and press `s`. From then on only
+that silhouette is followed, as with `--shape`, without restarting. The frame is saved as
+`data/shape_<date>-<time>.png`, so the next run's `--shape` (no path) reuses it. `x` goes back to colour only.
+`s` works with or without `--shape` on the command line.
 
 ## Modes
 
@@ -116,7 +122,7 @@ close that loop.
 | `--no-robot` | off | Don't connect to the robot. Not allowed with `--sim`, `--webcam-table` or `--calibrate`. |
 | `--camera` | `0` | Camera index, device path, or `realsense` (librealsense colour + aligned depth; see [Cameras](#cameras)). |
 | `--color` | `red` | `red`, `yellow`, `green` or `blue`. |
-| `--shape [PHOTO]` | off | Also match the object's **silhouette**, learned from `PHOTO`. With no path, the newest image in `data/` is used. The object must be the largest blob of `--color` in that photo. Live, a colour blob is kept only if its outline stays close to that silhouette (aspect ratio, how filled it is, Hu moments). Size and in-plane rotation do not matter, so a circle, a long bar, or an irregular blue region is ignored. The window draws the matched contour in green and prints `shape 0.xx` (0 = identical, kept up to 1.0). |
+| `--shape [PHOTO]` | off | Also match the object's **silhouette**, learned from `PHOTO`. With no path, the newest image in `data/` is used. The object must be the largest blob of `--color` in that photo. Live, a colour blob is kept only if its outline stays close to that silhouette (aspect ratio, how filled it is, Hu moments). Size and in-plane rotation do not matter, so a circle, a long bar, or an irregular blue region is ignored. The window draws the matched contour in green and prints `shape 0.xx` (0 = identical, kept up to 1.0). To take the photo with the running camera instead, press `s` in the window (see Keys). |
 | `--ip` | `127.0.0.1` | Robot IP. Any IP other than `127.0.0.1`/`localhost` requires `--start-here`. |
 | `--gain` | `1.0` | Proportional gain (1/s): velocity = gain × offset. Lower it if the robot oscillates. |
 | `--feedforward` | `0.3` | 0–1. Adds the object's estimated velocity, which removes most of the lag on a moving object. `0` = pure P control. |

@@ -6,6 +6,7 @@ silhouette learned from a photo (--shape).
 import glob
 import math
 import os
+import time
 
 import cv2
 import numpy as np
@@ -85,13 +86,29 @@ def learn_shape(path, color):
     img = cv2.imread(path)
     if img is None:
         raise FileNotFoundError(path)
+    return shape_from_image(img, color, source=path)
+
+
+def capture_shape(frame, color, folder='data'):
+    """Learn the shape from a live camera frame (largest blob of `color`, i.e. the blob that colour-only
+    detection follows), then save the frame as data/shape_<time>.png so `--shape` with no path reuses it
+    next run. Nothing is saved if no blob is large enough (RuntimeError)."""
+    model = shape_from_image(frame, color, source='the live frame')
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, time.strftime('shape_%Y%m%d-%H%M%S.png'))
+    cv2.imwrite(path, frame)
+    return model, path
+
+
+def shape_from_image(img, color, source='image'):
+    """ShapeModel of the largest blob of `color` in a BGR image."""
     contours, _ = cv2.findContours(color_mask(img, color), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     best = max(contours, key=cv2.contourArea, default=None)
     if best is None or cv2.contourArea(best) < MIN_AREA:
-        raise RuntimeError(f'no {color} object large enough in {path}')
+        raise RuntimeError(f'no {color} object large enough in {source}')
     model = ShapeModel(best)
     m = cv2.moments(best)
-    print(f'Shape learned from {path}: {color}, aspect {model.aspect:.2f}, '
+    print(f'Shape learned from {source}: {color}, aspect {model.aspect:.2f}, '
           f'filled {model.solidity:.2f}, area {cv2.contourArea(best):.0f} px, '
           f'centre ({m["m10"] / m["m00"]:.0f}, {m["m01"] / m["m00"]:.0f}). '
           f'A live blob is kept only while its silhouette stays close to this one '

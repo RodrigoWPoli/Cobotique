@@ -169,6 +169,13 @@ QWidget *MainWindow::buildTargetBox()
     shapeRow->addWidget(m_browseShape);
     layout->addRow(tr("Photo (--shape)"), shapeRow);
 
+    auto *captureHint = new QLabel(
+        tr("Pendant l'exécution, dans la fenêtre vidéo : <b>s</b> = prendre la photo de la forme "
+           "(objet = plus grand blob de la couleur), <b>x</b> = revenir à la couleur seule. "
+           "La photo est enregistrée dans data/ et réutilisée par --shape au prochain lancement."));
+    captureHint->setWordWrap(true);
+    layout->addRow(QString(), captureHint);
+
     connect(m_targetGroup, &QButtonGroup::idClicked, this, [this](int) {
         onTargetChanged();
         refreshCommandPreview();

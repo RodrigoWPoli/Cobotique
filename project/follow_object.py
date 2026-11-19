@@ -40,7 +40,8 @@ See README.md (repository root) for every option and parameter.
 Real robot (camera on the tool, object visible and still, hand on the e-stop):
     uv run python project/follow_object.py --ip <ROBOT_IP> --camera realsense --start-here --calibrate \
         --max-speed 0.02 --gain 1.5 --color red
-Keys: q / Esc quit, space pause (sim object motion), click: move the sim object.
+Keys: q / Esc quit, space pause (sim object motion), click: move the sim object,
+      s learn the shape from the current frame (saved to data/, like --shape), x forget the shape.
 """
 import argparse
 import math
@@ -53,7 +54,7 @@ import cv2
 import numpy as np
 
 from camera import DEPTH_MAX_M, DEPTH_MIN_M, Webcam, open_camera
-from detection import COLOR_RANGES, DRAW_BGR, detect, learn_shape, resolve_shape_photo
+from detection import COLOR_RANGES, DRAW_BGR, capture_shape, detect, learn_shape, resolve_shape_photo
 
 # ------------------------------------------------------------------ configuration
 ROBOT_IP = '127.0.0.1'
@@ -346,8 +347,8 @@ class WebcamTable(SimCamera):
     def read(self, tcp_pose, now):
         frame, _ = self._webcam()
         fh, fw = frame.shape[:2]
-        src = np.float32([(0, 0), (fw, 0), (fw, fh), (0, fh)])
-        dst = np.float32(self.project(self.table, tcp_pose))
+        src = np.array([(0, 0), (fw, 0), (fw, fh), (0, fh)], dtype=np.float32)
+        dst = np.asarray(self.project(self.table, tcp_pose), dtype=np.float32).reshape(4, 2)
         M = cv2.getPerspectiveTransform(src, dst)
         img = cv2.warpPerspective(frame, M, (self.w, self.h), borderValue=(60, 60, 60))
         # footprint of the tool camera's view on the webcam frame, for the overview inset
@@ -943,6 +944,7 @@ def main():
     depth_follower = DepthFollower(args.target_distance, args.depth_gain) if args.follow_depth else None
     target = np.zeros(motion.shape[1])   # position along the motion axes, relative to the start pose
     last_seq, det, frame = 0, None, None
+    notice = None                        # (text, until): short message drawn in the window
     errors, t0, last_print, tick = [], time.time(), 0.0, 0
     # Pace the loop to DT with our own clock. Not rtde_c.initPeriod()/waitPeriod(): those wait for the
     # RTDE interface's period (2 ms at the e-series' 500 Hz), so the loop ran at ~130 Hz and the
@@ -1017,6 +1019,9 @@ def main():
             tick += 1
             if not args.headless and tick % 2 == 0:   # display at 25 Hz
                 shown = draw_overlay(frame.copy(), det, K, follower, v, status)
+                if notice and now < notice[1]:
+                    cv2.putText(shown, notice[0], (10, shown.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6, (0, 255, 255), 2, cv2.LINE_AA)
                 if args.webcam_table:   # inset: webcam with the tool camera's footprint
                     inset = cam.overview()
                     shown[-inset.shape[0] - 10:-10, -inset.shape[1] - 10:-10] = inset
@@ -1027,6 +1032,18 @@ def main():
                 if key == ord(' ') and args.sim:
                     cam.paused = not cam.paused
                     cam.manual = None
+                if key == ord('s'):          # learn the shape from what the camera sees now
+                    try:
+                        shape, path = capture_shape(frame, args.color)
+                        print(f'Shape photo saved to {path} (--shape with no path reuses it)')
+                        notice = ('Shape learned: following only this silhouette', now + 2.5)
+                    except RuntimeError as e:
+                        print(f'Shape capture failed: {e}')
+                        notice = (f'Shape capture failed: no {args.color} object', now + 2.5)
+                if key == ord('x') and shape is not None:
+                    shape = None
+                    print('Shape forgotten: following by colour only')
+                    notice = ('Shape forgotten: colour only', now + 2.5)
             if args.duration and now > args.duration:
                 break
             next_tick += DT
