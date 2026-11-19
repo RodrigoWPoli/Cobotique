@@ -26,6 +26,11 @@ Modes
                    moves in the image (image Jacobian), then save it. Use it on the real robot: no need
                    to know how the camera is mounted. --load-calib reuses the saved one (no moves).
   --no-robot       Detection and computed velocity only, no robot connection (tune HSV ranges here).
+  --hand           Follow a hand instead of a colour (MediaPipe): a hand is followed whether it is
+                   open or closed; no hand sends the robot back to where following started (the --home
+                   pose with --home), at --max-speed. Works with every camera mode except --sim.
+                   With --gripper the claw copies the hand: a fist closes it, an open hand opens it
+                   (losing the hand leaves it as it is).
   --shape [PHOTO]  Also match the object's silhouette. PHOTO is a picture where the object is the
                    largest blob of --color (default: the newest image in data/). A blue circle or
                    a long bar is ignored; a blob the same shape as the photo is kept.
@@ -36,6 +41,7 @@ Examples (URSim running, see ursim/bringup.sh):
     uv run python project/follow_object.py --webcam-table --color red   # PC webcam + URSim
     uv run python project/follow_object.py --no-robot --color blue      # webcam, no robot
     uv run python project/follow_object.py --no-robot --color blue --camera realsense
+    uv run python project/follow_object.py --no-robot --hand            # hand detection only
 See README.md (repository root) for every option and parameter.
 Real robot (camera on the tool, object visible and still, hand on the e-stop):
     uv run python project/follow_object.py --ip <ROBOT_IP> --camera realsense --start-here --calibrate \
@@ -54,6 +60,8 @@ import cv2
 import numpy as np
 
 from camera import DEPTH_MAX_M, DEPTH_MIN_M, Webcam, open_camera
+from cobot.gripper import AsyncGripper, RobotiqGripper, ToolDOGripper
+from hand import GRIP_CONFIRM, MODEL_PATH as HAND_MODEL, AsyncHandDetector, HandDetector, HandGate, draw_hand
 from detection import COLOR_RANGES, DRAW_BGR, capture_shape, detect, learn_shape, resolve_shape_photo
 
 # ------------------------------------------------------------------ configuration
@@ -75,6 +83,7 @@ MAX_SPEED = 0.02                        # m/s, TCP speed cap (kept low for safet
 MAX_ACCEL = 0.15                        # m/s², limit on velocity changes
 DEADBAND_PX = 4                         # px, ignore smaller errors (detection jitter)
 ERROR_FILTER = 0.5                      # 0..1, low-pass on the measured offset (1 = no filter)
+HOME_GAIN = 1.0                         # 1/s, --hand: speed back home = HOME_GAIN x distance (capped)
 LOST_TIMEOUT = 0.5                      # s without detection before the robot stops
 
 CAM_HFOV_DEG = 60.0                     # horizontal field of view, for cameras that don't report their intrinsics
@@ -715,6 +724,19 @@ def load_calibration(path, A, pose0, max_angle_deg=30):
     return J, distance_m
 
 
+def home_velocity(target, v_prev, dt):
+    """--hand going home: velocity that brings `target` (offset from the start pose along the motion
+    axes) back to zero, at most MAX_SPEED, slowing down near it, with the MAX_ACCEL limit."""
+    target = np.asarray(target, float)
+    dist = float(np.linalg.norm(target))
+    v_des = np.zeros_like(target) if dist < 1e-3 else -target / dist * min(MAX_SPEED, HOME_GAIN * dist)
+    dv = v_des - np.asarray(v_prev, float)
+    max_dv = MAX_ACCEL * dt
+    if np.linalg.norm(dv) > max_dv:
+        dv *= max_dv / np.linalg.norm(dv)
+    return np.asarray(v_prev, float) + dv
+
+
 # ------------------------------------------------------------------ main loop
 def draw_overlay(img, det, K, follower, v, status):
     h, w = img.shape[:2]
@@ -745,6 +767,14 @@ def main():
     ap.add_argument('--shape', nargs='?', const='auto', default=None, metavar='PHOTO',
                     help='also match the silhouette from PHOTO (default: newest image in data/). '
                          'The object must be the largest blob of --color in that photo')
+    ap.add_argument('--hand', action='store_true',
+                    help='follow a hand (MediaPipe, open or closed) instead of a colour; no hand sends '
+                         'the robot back to where following started')
+    ap.add_argument('--hand-model', default=HAND_MODEL, help='MediaPipe gesture_recognizer.task')
+    ap.add_argument('--gripper', choices=['none', 'robotiq', 'tool-do'], default='none',
+                    help='with --hand: a fist closes the claw, an open hand opens it. robotiq = Robotiq '
+                         '2F-85/Hand-E through its URCap (port 63352); tool-do = tool digital output 0 '
+                         '(the simulated gripper, works in URSim)')
     ap.add_argument('--ip', default=ROBOT_IP)
     ap.add_argument('--gain', type=float, default=GAIN)
     ap.add_argument('--feedforward', type=float, default=FEEDFORWARD)
@@ -790,6 +820,34 @@ def main():
     GAIN, MAX_SPEED, FOLLOW_Z, FEEDFORWARD = args.gain, min(args.max_speed, 0.08), args.height, args.feedforward
     if (args.sim or args.webcam_table) and args.no_robot:
         sys.exit('--sim / --webcam-table need the robot pose; drop --no-robot')
+
+    if args.hand:
+        if args.sim:
+            sys.exit('--hand needs a real camera: --sim only renders a coloured disc (try --webcam-table)')
+        if args.calibrate:
+            sys.exit('--calibrate measures a coloured object; with --hand use --calibrate-scene or --load-calib')
+        if args.shape:
+            sys.exit('--shape is for colour detection; drop it with --hand')
+        try:
+            hand_det = AsyncHandDetector(HandDetector(args.hand_model))
+        except (OSError, RuntimeError) as e:
+            sys.exit(f'--hand: {e}')
+        gate = HandGate()
+        print('Hand mode: show a hand (open or closed) to be followed; hide it to send the robot home.')
+    else:
+        hand_det = gate = None
+    claw = None
+    if args.gripper != 'none':
+        if not args.hand:
+            sys.exit('--gripper copies the hand (fist = close): it needs --hand')
+        if args.no_robot:
+            sys.exit('--gripper needs the robot: drop --no-robot')
+        try:
+            claw = AsyncGripper(RobotiqGripper(args.ip) if args.gripper == 'robotiq' else ToolDOGripper(args.ip))
+        except (OSError, RuntimeError) as e:
+            hand_det.close()
+            sys.exit(f'--gripper {args.gripper}: {e}')
+        print(f'Gripper ({args.gripper}): a fist held {GRIP_CONFIRM} s closes it, an open hand opens it.')
 
     if args.home:
         args.start_here = True             # follow from home exactly like from the current pose
@@ -945,6 +1003,7 @@ def main():
     target = np.zeros(motion.shape[1])   # position along the motion axes, relative to the start pose
     last_seq, det, frame = 0, None, None
     notice = None                        # (text, until): short message drawn in the window
+    hand, hand_count, hand_time, v_prev = None, 0, 0.0, np.zeros(motion.shape[1])
     errors, t0, last_print, tick = [], time.time(), 0.0, 0
     # Pace the loop to DT with our own clock. Not rtde_c.initPeriod()/waitPeriod(): those wait for the
     # RTDE interface's period (2 ms at the e-series' 500 Hz), so the loop ran at ~130 Hz and the
@@ -966,8 +1025,24 @@ def main():
                 K = camera_matrix(cam, frame)
             new = seq != last_seq
             d = None
-            if new:
+            if hand_det:   # detection runs in its own thread: "new" = a new hand result, not a new frame
+                if new:
+                    hand_det.submit(frame)
+                    last_seq = seq
+                count, latest = hand_det.latest()
+                new = count != hand_count
+                if new:    # any visible hand is the object; no hand is "nothing to follow"
+                    hand_count, hand, hand_time = count, latest, now
+                    mode = gate.update(hand.state if hand else None, now)
+                    det = hand.as_detection() if hand is not None and mode == 'follow' else None
+                    if claw and gate.grip is not None:   # sent from its own thread, only on a change
+                        claw.request(gate.grip == 'closed')
+                elif now - hand_time > LOST_TIMEOUT:   # detector stalled: same as no hand
+                    hand = None
+                    gate.update(None, now)
+            elif new:
                 det, last_seq = detect(frame, args.color, shape), seq
+            if new:
                 if det is not None and hasattr(cam, 'depth_at'):
                     d = cam.depth_at(det[0], det[1], window=11)
                     if follower.J_calib is not None:
@@ -982,6 +1057,14 @@ def main():
                 budget = math.sqrt(max(MAX_SPEED ** 2 - float(np.dot(v, v)), 0.0))
                 v = np.append(v, np.clip(vz, -budget, budget))
 
+            if gate and gate.mode == 'home':
+                # back to the start pose along the motion axes; the controllers take over this velocity
+                # so following resumes smoothly when the hand opens again
+                v = home_velocity(target, v_prev, dt)
+                follower.v = v[:2].copy()
+                if depth_follower:
+                    depth_follower.v = float(v[2])
+
             proposed = target + v * dt           # measured dt: the speed cap holds even if the loop is late
             target = clamp_plane(proposed)
             # Anti-windup: an axis pressed against its box edge stops pushing, and its controller
@@ -994,6 +1077,7 @@ def main():
                         follower.v[k] = 0.0
                     elif depth_follower:
                         depth_follower.v = 0.0
+            v_prev = v
             if rtde_c:   # orientation stays the start orientation
                 rtde_c.servoL([*(origin + motion @ target), *start[3:]], 0.0, 0.0, DT, 0.1, 300)
 
@@ -1002,6 +1086,10 @@ def main():
                 errors.append((now, np.linalg.norm(below - cam.object_xy())))
 
             status = 'TRACKING' if follower.tracking else 'LOST'
+            if gate:
+                status = ('FOLLOW' if gate.mode == 'follow' else 'HOME') + f'  hand {hand.state if hand else "none"}'
+                if claw and claw.state is not None:
+                    status += f'  claw {"closed" if claw.state else "open"}'
             if det is not None and det[4] is not None:
                 status += f'  shape {det[4]:.2f}'
             if now - last_print > 1.0:
@@ -1019,6 +1107,8 @@ def main():
             tick += 1
             if not args.headless and tick % 2 == 0:   # display at 25 Hz
                 shown = draw_overlay(frame.copy(), det, K, follower, v, status)
+                if hand is not None:
+                    draw_hand(shown, hand, gate.mode)
                 if notice and now < notice[1]:
                     cv2.putText(shown, notice[0], (10, shown.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.6, (0, 255, 255), 2, cv2.LINE_AA)
@@ -1032,7 +1122,7 @@ def main():
                 if key == ord(' ') and args.sim:
                     cam.paused = not cam.paused
                     cam.manual = None
-                if key == ord('s'):          # learn the shape from what the camera sees now
+                if key == ord('s') and not hand_det:          # learn the shape from what the camera sees now
                     try:
                         shape, path = capture_shape(frame, args.color)
                         print(f'Shape photo saved to {path} (--shape with no path reuses it)')
@@ -1062,6 +1152,10 @@ def main():
         if rtde_r:
             rtde_r.disconnect()
         cam.close()
+        if hand_det:
+            hand_det.close()
+        if claw:
+            claw.close()
         cv2.destroyAllWindows()
 
     if errors:

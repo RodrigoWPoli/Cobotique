@@ -52,7 +52,7 @@ Requirements: [uv](https://docs.astral.sh/uv/), Docker, git-lfs (`sudo dnf insta
 ```bash
 uv sync                      # .venv with Python 3.12 (ur_rtde has no wheels for newer versions)
 scripts/setup_git.sh         # once per clone: notebook output stripping + Git LFS
-scripts/download_models.sh   # MobileNet-SSD weights (checksummed, not in git)
+scripts/download_models.sh   # MobileNet-SSD weights + MediaPipe gesture model (checksummed, not in git)
 ursim/bringup.sh             # start URSim, power on, release brakes
 uv run pytest                # tests; the `ursim` one needs URSim running (skip with -m "not ursim")
 ```
@@ -87,6 +87,9 @@ All commands run from the repository root.
 | Self-test, prints the tracking error | `uv run python project/follow_object.py --sim --headless --duration 25` |
 | PC webcam with URSim | `uv run python project/follow_object.py --webcam-table --color red` |
 | Check detection only, no robot | `uv run python project/follow_object.py --no-robot --color blue --camera realsense` |
+| Follow a hand, detection only | `uv run python project/follow_object.py --no-robot --hand` |
+| Follow a hand, real robot | `uv run python project/follow_object.py --ip 100.65.63.93 --camera realsense --home --load-calib --hand` |
+| … and the claw copies the hand | add `--gripper robotiq` (fist = close, open hand = open) |
 | **Real robot** | see [Real robot](#real-robot) |
 
 `--camera realsense` opens colour + aligned depth via librealsense (see [Cameras](#cameras)).
@@ -109,6 +112,46 @@ that silhouette is followed, as with `--shape`, without restarting. The frame is
 | `--webcam-table` | Lays the (mirrored) webcam image flat on the virtual table, 1.8× larger than the tool camera's view. The tool camera sees the part under the TCP. Move an object in front of the webcam and the robot goes after it. An inset shows the webcam with the tool camera's footprint in yellow. | URSim + PC webcam |
 | `--no-robot` | Detection and computed velocity only, no robot connection. Use it to check colours. | Any camera |
 
+### Hand mode (`--hand`)
+
+Instead of a colour, the robot follows a **hand**, detected with MediaPipe's gesture recognizer
+(`gesture_recognizer.task`, fetched by `scripts/download_models.sh`):
+
+- **a hand, open or closed**: the robot follows the centre of the palm, exactly like a coloured object;
+- **no hand**: the robot goes back to where following started (the `--home` pose with `--home`, the
+  start pose with `--start-here`, the start pose in URSim), at `--max-speed`, still through `servoL`.
+  With `--follow-depth` the distance along the camera axis returns too.
+
+Open or closed only matters for the claw (below). The robot starts in "home" and only follows once a
+hand has been seen for 0.3 s; it goes home after 0.5 s without a hand, so a brief misdetection does
+not move it. A fist also starts the following, so after losing the hand while holding something you
+don't have to open it (and drop the object) to get the robot back. Open/closed combines the
+recognizer's `Open_Palm` / `Closed_Fist` label with a count of straight fingers from the 21 landmarks
+(a finger is straight when its tip is farther from the wrist than its middle joint); anything else
+(pointing, two fingers) is "uncertain" and leaves the claw as it is. The window draws the hand
+skeleton (green when followed, orange otherwise) and its state.
+
+**The claw (`--gripper`)** copies the hand: a fist seen for 0.3 s closes it, an open hand seen for
+0.3 s opens it. Losing the hand sends the robot home but leaves the claw as it is, so it never drops
+or grabs something because the hand left the image. Nothing is sent before the first clear fist or
+open hand.
+
+- `--gripper robotiq`: Robotiq 2F-85 / Hand-E. The Robotiq URCap runs a text server on the robot
+  (port 63352, `SET POS 255 SPE 128 FOR 100 GTO 1` = close); it works next to the RTDE control script.
+  If the gripper is not activated yet, the script activates it first, and the gripper then opens and
+  closes fully once. Speed and force are `GRIP_SPEED` / `GRIP_FORCE` in `src/cobot/gripper.py` (about
+  half speed, 40 % force).
+- `--gripper tool-do`: tool digital output 0, the simulated gripper of `cobot.Robot`. It is the one
+  that works in URSim (no Robotiq URCap there).
+
+Commands are sent from their own thread, and only when the wanted state changes, so the servo loop
+never waits for the gripper. The status line shows `claw open` / `claw closed`.
+
+Detection takes ~30 ms per frame on a CPU, so it runs in its own thread on the newest frame and the
+50 Hz servo loop never waits for it. `--hand` works with `--no-robot`, `--webcam-table` and the real
+robot, not with `--sim` (it only renders a disc). `--calibrate` measures a coloured object, so with
+`--hand` calibrate with `--calibrate-scene` or reuse one with `--load-calib`.
+
 Why not just the webcam with URSim? The simulated robot can't move a real webcam, so the object
 never re-centres and the robot drifts to the edge of the workspace. `--sim` and `--webcam-table`
 close that loop.
@@ -122,6 +165,8 @@ close that loop.
 | `--no-robot` | off | Don't connect to the robot. Not allowed with `--sim`, `--webcam-table` or `--calibrate`. |
 | `--camera` | `0` | Camera index, device path, or `realsense` (librealsense colour + aligned depth; see [Cameras](#cameras)). |
 | `--color` | `red` | `red`, `yellow`, `green` or `blue`. |
+| `--hand` | off | Follow a **hand** (open or closed) instead of a colour; no hand sends the robot back to its start pose. See [Hand mode](#hand-mode---hand). `--hand-model` changes the model path. |
+| `--gripper {none,robotiq,tool-do}` | `none` | With `--hand`: a fist closes the claw, an open hand opens it. `robotiq` = Robotiq through its URCap (port 63352), `tool-do` = tool digital output 0 (URSim). |
 | `--shape [PHOTO]` | off | Also match the object's **silhouette**, learned from `PHOTO`. With no path, the newest image in `data/` is used. The object must be the largest blob of `--color` in that photo. Live, a colour blob is kept only if its outline stays close to that silhouette (aspect ratio, how filled it is, Hu moments). Size and in-plane rotation do not matter, so a circle, a long bar, or an irregular blue region is ignored. The window draws the matched contour in green and prints `shape 0.xx` (0 = identical, kept up to 1.0). To take the photo with the running camera instead, press `s` in the window (see Keys). |
 | `--ip` | `127.0.0.1` | Robot IP. Any IP other than `127.0.0.1`/`localhost` requires `--start-here`. |
 | `--gain` | `1.0` | Proportional gain (1/s): velocity = gain × offset. Lower it if the robot oscillates. |
@@ -178,6 +223,10 @@ Constants at the top of `follow_object.py` (detection constants live in `project
 | `COLOR_RANGES` | see `project/detection.py` | HSV ranges per colour (OpenCV: H 0–179; red needs two ranges). |
 | `MIN_AREA` | `300` px² | Smaller blobs are ignored (`project/detection.py`). |
 | `SHAPE_MAX` | `1.0` | Max silhouette distance kept with `--shape` (`project/detection.py`). |
+| `PRESENT_CONFIRM` / `HOME_DELAY` | `0.3` / `0.5` s | `--hand`: how long a hand must be seen before following, and how long without a hand before going home (`project/hand.py`). |
+| `GRIP_CONFIRM` | `0.3` s | `--gripper`: how long a fist / open hand must be seen before the claw moves (`project/hand.py`). |
+| `GRIP_SPEED` / `GRIP_FORCE` | `128` / `100` (0–255) | Robotiq speed and force (`src/cobot/gripper.py`). |
+| `HOME_GAIN` | `1.0` 1/s | `--hand`: speed back home = gain × distance, capped at `--max-speed`. |
 | `WebcamTable.ZOOM` | `1.8` | `--webcam-table`: size of the webcam image on the table relative to the tool camera's view. |
 
 ## Cameras
@@ -316,6 +365,7 @@ The simulated camera has no latency; expect a lower usable gain on the real robo
 |---|---|
 | `src/cobot/` | Shared package, installed editable by `uv sync` (`import cobot`) |
 | `src/cobot/robot.py` | `Robot`: an RTDE connection with checked `move_j`, `move_l` and `gripper` |
+| `src/cobot/gripper.py` | `RobotiqGripper` (URCap socket), `ToolDOGripper`, and `AsyncGripper` (sends from a thread) |
 | `src/cobot/kinematics.py` | UR5e forward kinematics (DH), pose ↔ matrix |
 | `src/cobot/vision.py` | Camera helpers, HSV colour detection, MobileNet-SSD |
 | `src/cobot/calibration.py` | Checkerboard corner ordering, camera → robot homography, `pixel_to_robot` |
@@ -325,6 +375,7 @@ The simulated camera has no latency; expect a lower usable gain on the real robo
 | `compose.yaml`, `ursim/` | URSim 5.26 container (image pinned by digest), programs and URCaps volumes |
 | `project/follow_object.py` | **Object following** (this page) |
 | `project/detection.py` | HSV colour blobs + optional silhouette match (`--shape`) |
+| `project/hand.py` | Hand detection (MediaPipe) and the open/closed → follow/home logic (`--hand`) |
 | `project/camera.py` | Webcam / RealSense (colour + aligned depth) |
 | `gui/` | Qt6 launcher (`follow_launcher`) for scenarios + logs |
 | `workshop/` | Workshop decks and notebooks, kept locally and git-ignored |

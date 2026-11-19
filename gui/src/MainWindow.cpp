@@ -147,8 +147,13 @@ QWidget *MainWindow::buildTargetBox()
     m_targetGroup = new QButtonGroup(this);
     m_targetGroup->addButton(m_tgColor, 0);
     m_targetGroup->addButton(m_tgShape, 1);
+    m_tgHand = new QRadioButton(tr("Main (--hand)"));
+    m_tgHand->setToolTip(tr("Main visible, ouverte ou fermée : le robot la suit. Pas de main : retour au point "
+                            "de départ (la pose --home avec --home). Avec une pince : poing = fermée."));
+    m_targetGroup->addButton(m_tgHand, 2);
     modeRow->addWidget(m_tgColor);
     modeRow->addWidget(m_tgShape);
+    modeRow->addWidget(m_tgHand);
     modeRow->addStretch(1);
     layout->addRow(tr("Mode"), modeRow);
 
@@ -157,6 +162,15 @@ QWidget *MainWindow::buildTargetBox()
                        QStringLiteral("green"), QStringLiteral("blue")});
     m_color->setCurrentText(QStringLiteral("blue"));
     layout->addRow(tr("Couleur (--color)"), m_color);
+
+    m_gripper = new QComboBox;
+    m_gripper->addItem(tr("Aucune"), QStringLiteral("none"));
+    m_gripper->addItem(tr("Robotiq (URCap, port 63352)"), QStringLiteral("robotiq"));
+    m_gripper->addItem(tr("Sortie outil DO0 (simulée, URSim)"), QStringLiteral("tool-do"));
+    m_gripper->setToolTip(tr("Avec la main : poing fermé = pince fermée, main ouverte = pince ouverte. "
+                             "Si la main disparaît, la pince ne bouge pas."));
+    layout->addRow(tr("Pince (--gripper)"), m_gripper);
+    connect(m_gripper, &QComboBox::currentIndexChanged, this, [this](int) { refreshCommandPreview(); });
 
     auto *shapeRow = new QHBoxLayout;
     m_shapePath = new QLineEdit;
@@ -425,6 +439,8 @@ MainWindow::Scenario MainWindow::currentScenario() const
 
 MainWindow::Target MainWindow::currentTarget() const
 {
+    if (m_tgHand->isChecked())
+        return Target::Hand;
     return m_tgShape->isChecked() ? Target::Shape : Target::ColorOnly;
 }
 
@@ -530,7 +546,24 @@ QStringList MainWindow::buildArgs(QString *error) const
     else if (!camera.isEmpty())
         args << QStringLiteral("--camera") << camera;
 
-    args << QStringLiteral("--color") << m_color->currentText();
+    if (target == Target::Hand) {
+        if (scenario == Scenario::URSim && currentUrsimMode() == UrsimMode::Sim) {
+            if (error)
+                *error = tr("--hand a besoin d'une vraie caméra : choisir --webcam-table plutôt que --sim.");
+            return {};
+        }
+        if (scenario == Scenario::LabRobot && calib == CalibMode::Calibrate) {
+            if (error)
+                *error = tr("--calibrate mesure un objet coloré : avec --hand, utiliser --calibrate-scene ou --load-calib.");
+            return {};
+        }
+        args << QStringLiteral("--hand");
+        const QString gripper = m_gripper->currentData().toString();
+        if (scenario != Scenario::Detection && gripper != QLatin1String("none"))
+            args << QStringLiteral("--gripper") << gripper;
+    } else {
+        args << QStringLiteral("--color") << m_color->currentText();
+    }
 
     if (target == Target::Shape) {
         const QString path = m_shapePath->text().trimmed();
@@ -617,6 +650,8 @@ QString MainWindow::commandPreviewText() const
 void MainWindow::onScenarioChanged()
 {
     const Scenario s = currentScenario();
+    if (m_gripper && m_tgHand)
+        onTargetChanged();
     m_labBox->setVisible(s == Scenario::LabRobot);
     m_ursimBox->setVisible(s == Scenario::URSim);
 
@@ -635,7 +670,11 @@ void MainWindow::onScenarioChanged()
 
 void MainWindow::onTargetChanged()
 {
+    if (!m_gripper)
+        return;
     const bool shape = (currentTarget() == Target::Shape);
+    m_color->setEnabled(currentTarget() != Target::Hand);
+    m_gripper->setEnabled(currentTarget() == Target::Hand && currentScenario() != Scenario::Detection);
     m_shapePath->setEnabled(shape);
     m_browseShape->setEnabled(shape);
 }

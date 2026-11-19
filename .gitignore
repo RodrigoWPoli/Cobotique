@@ -7,6 +7,7 @@ __pycache__/
 
 # Large / third-party assets (fetched by scripts/download_models.sh)
 *.caffemodel
+*.task
 
 # Run outputs (notebooks and scripts write these)
 trajectory.csv

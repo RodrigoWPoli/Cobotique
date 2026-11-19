@@ -46,7 +46,7 @@ private slots:
 
 private:
     enum class Scenario { Detection, LabRobot, URSim };
-    enum class Target { ColorOnly, Shape };
+    enum class Target { ColorOnly, Shape, Hand };
     enum class PoseMode { Home, StartHere };
     enum class CalibMode { Load, Calibrate, CalibrateScene, None };
     enum class UrsimMode { Sim, WebcamTable };
@@ -83,8 +83,10 @@ private:
     // Target
     QRadioButton *m_tgColor = nullptr;
     QRadioButton *m_tgShape = nullptr;
+    QRadioButton *m_tgHand = nullptr;
     QButtonGroup *m_targetGroup = nullptr;
     QComboBox *m_color = nullptr;
+    QComboBox *m_gripper = nullptr;
     QLineEdit *m_shapePath = nullptr;
     QPushButton *m_browseShape = nullptr;
 
